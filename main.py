@@ -595,7 +595,7 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                         f"⚠️ <b>超时警告</b>\n"
                         f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
                         f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经<code>超时</code>！\n"
-                        f"💢 请立即回座，避免产生罚款！"
+                        f"💢 请立即回座，避免产生更多罚款！"
                     )
                     await bot.send_message(chat_id, timeout_msg, parse_mode="HTML")
                     timeout_immediate_sent = True
@@ -1854,4 +1854,5 @@ if __name__ == "__main__":
         logging.info("👋 机器人已手动停止")
     except Exception as e:
         logging.error(f"💥 机器人异常退出: {e}")
+
         sys.exit(1)
