@@ -34,7 +34,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # ==================== 集中配置区域 ====================
 class Config:
     # Bot 配置
-    TOKEN = os.getenv("BOT_TOKEN", "8331871504:AAFrghUMT0gCQCtpLiSJMIPRTaki2BoQJWc")
+    TOKEN = os.getenv("BOT_TOKEN", "8144712657:AAEU3edVjMs8kt9OC8jQiIZMnRErjSs1TPo")
 
     # 文件配置
     DATA_FILE = "group_data.json"
@@ -1856,4 +1856,5 @@ if __name__ == "__main__":
         logging.error(f"💥 机器人异常退出: {e}")
 
         sys.exit(1)
+
 
