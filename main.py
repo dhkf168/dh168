@@ -925,7 +925,12 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
 
             # 1分钟前警告
             if 0 < remaining <= 60 and not one_minute_warning_sent:
-                warning_msg = f"⏳ <b>即将超时警告</b>：您本次{MessageFormatter.format_copyable_text(act)}还有 <code>1</code> 分钟即将超时！\n💡 请及时回座，避免超时罚款"
+                warning_msg = (
+                    f"⏳ <b>即将超时警告</b>\n"
+                    f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+                    f"❌ 您本次{MessageFormatter.format_copyable_text(act)}还有 <code>1</code> 分钟即将超时！\n"
+                    f"💡 请及时回座，避免超时罚款"
+                )
                 await bot.send_message(chat_id, warning_msg, parse_mode="HTML")
                 one_minute_warning_sent = True
 
