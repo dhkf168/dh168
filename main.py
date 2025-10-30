@@ -2186,6 +2186,81 @@ async def cmd_workend(message: types.Message):
 
 
 # ============ 上下班打卡处理函数 ============
+async def auto_end_current_activity(chat_id: int, uid: int, user_data: dict, now: datetime, message: types.Message = None):
+    """自动结束当前正在进行的活动"""
+    try:
+        current_activity = user_data.get("活动")
+        if not current_activity:
+            return
+
+        # 记录活动信息
+        act = current_activity
+        start_time = datetime.fromisoformat(user_data["开始时间"])
+        elapsed = (now - start_time).total_seconds()
+        total_activity_time = user_data["累计"].get(act, 0) + elapsed
+
+        # 计算超时和罚款
+        time_limit_seconds = activity_limits[act]["time_limit"] * 60
+        is_overtime = elapsed > time_limit_seconds
+        overtime_seconds = max(0, int(elapsed - time_limit_seconds))
+        overtime_minutes = overtime_seconds / 60
+
+        fine_amount = 0
+        if is_overtime and overtime_seconds > 0:
+            fine_amount = calculate_fine(act, overtime_minutes)
+            user_data["累计罚款"] = user_data.get("累计罚款", 0) + fine_amount
+            user_data["超时次数"] = user_data.get("超时次数", 0) + 1
+            user_data["总超时时间"] = user_data.get("总超时时间", 0) + overtime_seconds
+
+        # 更新用户数据
+        user_data["累计"][act] = total_activity_time
+        user_data["总累计时间"] = user_data.get("总累计时间", 0) + elapsed
+        user_data["总次数"] = user_data.get("总次数", 0) + 1
+        
+        # 清除活动状态
+        user_data["活动"] = None
+        user_data["开始时间"] = None
+
+        # 取消定时任务
+        key = f"{chat_id}-{uid}"
+        await safe_cancel_task(key)
+
+        # 发送自动结束通知
+        if message:
+            auto_end_msg = (
+                f"🔄 <b>自动结束活动通知</b>\n"
+                f"👤 用户：{MessageFormatter.format_user_link(uid, user_data['昵称'])}\n"
+                f"📝 检测到您有未结束的活动：<code>{act}</code>\n"
+                f"⏰ 由于您进行了下班打卡，系统已自动为您结束该活动\n"
+                f"⏱️ 活动时长：<code>{MessageFormatter.format_time(int(elapsed))}</code>"
+            )
+            
+            if is_overtime:
+                auto_end_msg += f"\n⚠️ 本次活动已超时！\n⏰ 超时时长：<code>{MessageFormatter.format_time(int(overtime_seconds))}</code>"
+                if fine_amount > 0:
+                    auto_end_msg += f"\n💰 超时罚款：<code>{fine_amount}</code> 元"
+            
+            auto_end_msg += f"\n\n✅ 活动已自动结束，下班打卡继续处理..."
+
+            await message.answer(
+                auto_end_msg,
+                reply_markup=get_main_keyboard(chat_id=chat_id, show_admin=is_admin(uid)),
+                parse_mode="HTML"
+            )
+
+        # 记录日志
+        logger.info(f"✅ 用户 {uid} 的下班打卡自动结束了活动: {act}, 时长: {elapsed}秒")
+
+    except Exception as e:
+        logger.error(f"❌ 自动结束活动失败: {e}")
+        if message:
+            await message.answer(
+                f"⚠️ 自动结束活动时出现错误，但下班打卡将继续处理\n错误详情: {e}",
+                reply_markup=get_main_keyboard(chat_id=chat_id, show_admin=is_admin(uid))
+            )
+
+
+# ============ 上下班打卡处理函数 ============
 async def process_work_checkin(message: types.Message, checkin_type: str):
     """处理上下班打卡"""
     chat_id = message.chat.id
@@ -2201,6 +2276,14 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
 
         user_data = group_data[str(chat_id)]["成员"][str(uid)]
         today = str(now.date())
+
+        # 检查是否有正在进行的活动（仅在下班打卡时检查）
+        current_activity = user_data.get("活动")
+        activity_auto_ended = False
+        if checkin_type == "work_end" and current_activity:
+            # 自动结束当前活动
+            await auto_end_current_activity(chat_id, uid, user_data, now, message)
+            activity_auto_ended = True
 
         if "上下班记录" not in user_data:
             user_data["上下班记录"] = {}
@@ -2309,6 +2392,10 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             f"📅 期望时间：<code>{expected_time}</code>\n"
             f"📊 状态：{status}"
         )
+
+        # 如果自动结束了活动，添加提示
+        if checkin_type == "work_end" and activity_auto_ended and current_activity:
+            result_msg += f"\n\n🔄 检测到您有未结束的活动 <code>{current_activity}</code>，已自动为您结束"
 
         await message.answer(
             result_msg,
