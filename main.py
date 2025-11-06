@@ -4336,17 +4336,226 @@ async def optimized_main():
         await optimized_on_shutdown()
 
 
-async def main():
-    """主启动函数 - PostgreSQL版本"""
+# ==================== Webhook 路由处理 ====================
+
+
+async def webhook_handler(request: web.Request):
+    """处理Telegram Webhook请求"""
     try:
-        await db.initialize()
-        await optimized_main()
+        # 验证请求来源（可选但推荐）
+        # 您可以添加Token验证来确保请求来自Telegram
+
+        update_data = await request.json()
+        update = types.Update(**update_data)
+
+        # 使用Dispatcher处理更新
+        await dp.feed_update(bot, update)
+
+        return web.Response(status=200, text="OK")
+
     except Exception as e:
-        logger.error(f"❌ 主程序异常: {e}")
+        logger.error(f"❌ Webhook处理错误: {e}")
+        return web.Response(status=500, text="Internal Server Error")
+
+
+async def start_webhook_server():
+    """启动Webhook服务器"""
+    try:
+        # 设置Webhook
+        webhook_url = f"{Config.WEBHOOK_URL}/webhook"
+
+        logger.info(f"🔗 设置Webhook: {webhook_url}")
+        await bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "chat_member"],
+        )
+
+        # 验证Webhook设置
+        webhook_info = await bot.get_webhook_info()
+        logger.info(f"📊 Webhook信息: {webhook_info.url}")
+        logger.info(f"📊 待处理更新: {webhook_info.pending_update_count}")
+
+        # 创建aiohttp应用
+        app = web.Application()
+
+        # 添加路由
+        app.router.add_post("/webhook", webhook_handler)
+        app.router.add_get("/health", enhanced_health_check)
+        app.router.add_get("/", enhanced_health_check)
+        app.router.add_get("/status", enhanced_health_check)
+        app.router.add_get("/ping", lambda request: web.Response(text="pong"))
+
+        # 启动服务器
+        runner = web.AppRunner(app)
+        await runner.setup()
+
+        port = int(os.environ.get("PORT", Config.WEB_SERVER_CONFIG["PORT"]))
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+
+        logger.info(f"🌐 Webhook服务器已在端口 {port} 启动")
+        logger.info("✅ Webhook模式已就绪，等待Telegram请求...")
+
+        return runner
+
+    except Exception as e:
+        logger.error(f"❌ Webhook服务器启动失败: {e}")
+        # 尝试删除Webhook并回退到Polling
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("🔄 已删除Webhook，将使用Polling模式")
+        except:
+            pass
+        raise
+
+
+async def webhook_main():
+    """Webhook模式主函数"""
+    logger.info("🚀 启动Webhook模式...")
+
+    try:
+        await optimized_on_startup()
+
+        # 启动Webhook服务器
+        webhook_runner = await start_webhook_server()
+
+        # 启动后台任务
+        background_tasks = [
+            asyncio.create_task(memory_cleanup_task()),
+            asyncio.create_task(health_monitoring_task()),
+            asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
+            asyncio.create_task(daily_reset_task()),
+            asyncio.create_task(auto_daily_export_task()),
+            asyncio.create_task(efficient_monthly_export_task()),
+        ]
+
+        logger.info(f"✅ 后台任务已启动: {len(background_tasks)} 个任务")
+
+        # 保持服务器运行
+        try:
+            while True:
+                await asyncio.sleep(3600)  # 每小时检查一次
+
+                # 可选：定期检查Webhook状态
+                try:
+                    webhook_info = await bot.get_webhook_info()
+                    if webhook_info.pending_update_count > 100:
+                        logger.warning(
+                            f"⚠️ 待处理更新较多: {webhook_info.pending_update_count}"
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ 检查Webhook状态失败: {e}")
+
+        except asyncio.CancelledError:
+            logger.info("🛑 Webhook服务器被取消")
+        except Exception as e:
+            logger.error(f"❌ Webhook服务器运行错误: {e}")
+            raise
+
+    except Exception as e:
+        logger.error(f"❌ Webhook模式启动失败: {e}")
+        raise
+
+    finally:
+        # 清理资源
+        try:
+            if "webhook_runner" in locals():
+                await webhook_runner.cleanup()
+        except Exception as e:
+            logger.warning(f"⚠️ 清理Webhook运行器失败: {e}")
+
+        await optimized_on_shutdown()
+
+
+async def polling_main():
+    """Polling模式主函数"""
+    logger.info("🚀 启动Polling模式...")
+
+    await optimized_on_startup()
+
+    # 启动后台任务
+    background_tasks = [
+        asyncio.create_task(memory_cleanup_task()),
+        asyncio.create_task(health_monitoring_task()),
+        asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
+        asyncio.create_task(daily_reset_task()),
+        asyncio.create_task(auto_daily_export_task()),
+        asyncio.create_task(efficient_monthly_export_task()),
+    ]
+
+    logger.info(f"✅ 后台任务已启动: {len(background_tasks)} 个任务")
+    logger.info("🔄 开始轮询消息...")
+
+    try:
+        await dp.start_polling(bot, skip_updates=True)
+    except Exception as e:
+        logger.error(f"❌ Polling模式运行错误: {e}")
+        raise
+
+
+# 修改主函数以支持两种模式
+async def main():
+    """主启动函数 - 支持Webhook和Polling双模式"""
+    if not check_environment():
+        logger.error("❌ 环境检查失败")
+        sys.exit(1)
+
+    try:
+        # 初始化数据库
+        await db.initialize()
+        logger.info("✅ 数据库初始化完成")
+
+        # 根据配置选择运行模式
+        if Config.should_use_webhook():
+            logger.info("🎯 使用 Webhook 模式")
+            await webhook_main()
+        else:
+            logger.info("🎯 使用 Polling 模式")
+            await polling_main()
+
+    except KeyboardInterrupt:
+        logger.info("👋 收到中断信号，正在关闭...")
+    except Exception as e:
+        logger.error(f"💥 主程序异常: {e}")
+        # 尝试发送错误通知给管理员
+        try:
+            for admin_id in Config.ADMINS:
+                await bot.send_message(admin_id, f"🤖 机器人异常崩溃:\n{str(e)}")
+        except:
+            pass
         raise
     finally:
-        await db.close()
-        logger.info("✅ 数据库连接已关闭，程序安全退出。")
+        # 确保资源清理
+        try:
+            await optimized_on_shutdown()
+        except Exception as e:
+            logger.error(f"❌ 关闭过程中出错: {e}")
+
+        try:
+            await db.close()
+            logger.info("✅ 数据库连接已关闭")
+        except Exception as e:
+            logger.error(f"❌ 关闭数据库连接失败: {e}")
+
+        logger.info("🎉 程序安全退出")
+
+
+async def polling_main():
+    """Polling模式主函数"""
+    await optimized_on_startup()
+
+    # 启动后台任务
+    background_tasks = [
+        asyncio.create_task(memory_cleanup_task()),
+        asyncio.create_task(health_monitoring_task()),
+        asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
+        asyncio.create_task(daily_reset_task()),
+        asyncio.create_task(auto_daily_export_task()),
+    ]
+
+    logger.info("🚀 使用 Polling 模式运行")
+    await dp.start_polling(bot, skip_updates=True)
 
 
 if __name__ == "__main__":
