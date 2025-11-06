@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: daka-posters-bot
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: BOT_MODE
+        value: polling
+      - key: ENVIRONMENT
+        value: production
+      - key: PORT
+        value: 10000
