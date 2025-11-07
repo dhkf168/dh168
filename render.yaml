@@ -1,18 +1,16 @@
+# render.yaml
 services:
   - type: web
     name: telegram-bot
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    env: docker
+    docker:
+      dockerfile: Dockerfile
     envVars:
       - key: BOT_TOKEN
-        value: YOUR_BOT_TOKEN_HERE
-      - key: BOT_MODE
-        value: webhook
-      - key: WEBHOOK_URL
-        value: https://your-app-name.onrender.com
+        value: your_bot_token_here
       - key: DATABASE_URL
-        value: YOUR_DATABASE_URL_HERE
-      - key: ENVIRONMENT
-        value: production
+        value: your_postgresql_url_here
+      - key: ADMIN_IDS
+        value: "8356418002,6607669683"
+      - key: BOT_MODE
+        value: "polling" # Render 免费版必须用 polling
