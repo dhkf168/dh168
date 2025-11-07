@@ -365,18 +365,6 @@ def print_startup_config():
 
 
 @classmethod
-def should_use_webhook(cls):
-    """智能判断是否应该使用Webhook模式"""
-    if cls.BOT_MODE == "webhook":
-        return True
-    elif cls.BOT_MODE == "polling":
-        return False
-    else:  # auto模式
-        # 自动检测：有WEBHOOK_URL且不在开发环境就使用Webhook
-        return bool(cls.WEBHOOK_URL) and not cls.is_development()
-
-
-@classmethod
 def should_use_polling(cls):
     """智能判断是否应该使用Polling模式"""
     return not cls.should_use_webhook()
