@@ -4137,34 +4137,8 @@ def check_environment():
 
 # ==================== Webhook 设置函数 ====================
 async def setup_webhook():
-    """配置Webhook - 支持智能回退到Polling"""
-    if Config.should_use_webhook():
-        if not Config.WEBHOOK_URL:
-            logger.error("❌ Webhook模式已启用，但WEBHOOK_URL未设置，将使用Polling模式")
-            return False
-
-        webhook_url = f"{Config.WEBHOOK_URL}/webhook"
-        try:
-            await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-            logger.info(f"✅ Webhook已设置: {webhook_url}")
-
-            # 验证Webhook设置
-            webhook_info = await bot.get_webhook_info()
-            logger.info(f"📊 Webhook信息: {webhook_info.url}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Webhook设置失败: {e}")
-            logger.warning("⚠️ Webhook设置失败，将自动回退到Polling模式")
-            # 删除可能存在的Webhook
-            try:
-                await bot.delete_webhook(drop_pending_updates=True)
-                logger.info("✅ 已清理失败的Webhook设置")
-            except Exception as delete_error:
-                logger.warning(f"⚠️ 清理Webhook失败: {delete_error}")
-            return False
-    else:
+    """配置Webhook - 带洪水控制保护"""
+    if not Config.should_use_webhook():
         # 明确使用Polling模式，清理Webhook
         try:
             await bot.delete_webhook(drop_pending_updates=True)
@@ -4173,15 +4147,75 @@ async def setup_webhook():
             logger.warning(f"⚠️ 删除Webhook失败: {e}")
         return False
 
+    if not Config.WEBHOOK_URL:
+        logger.error("❌ Webhook模式已启用，但WEBHOOK_URL未设置，将使用Polling模式")
+        return False
+
+    try:
+        # 修复URL格式
+        base_url = Config.WEBHOOK_URL.rstrip("/")
+        webhook_url = f"{base_url}/webhook"
+
+        # 先检查当前Webhook状态，避免不必要的设置
+        current_webhook = await bot.get_webhook_info()
+
+        if current_webhook.url == webhook_url:
+            logger.info(f"✅ Webhook已正确设置: {webhook_url}")
+            return True
+
+        logger.info(f"🔗 设置Webhook: {webhook_url}")
+
+        # 先删除旧Webhook
+        await bot.delete_webhook(drop_pending_updates=True)
+        await asyncio.sleep(2)  # 等待2秒避免洪水限制
+
+        # 设置新Webhook
+        await bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+        )
+
+        # 验证设置
+        await asyncio.sleep(1)
+        new_webhook = await bot.get_webhook_info()
+
+        if new_webhook.url == webhook_url:
+            logger.info(f"✅ Webhook设置成功: {webhook_url}")
+            logger.info(f"📊 待处理更新: {new_webhook.pending_update_count}")
+            return True
+        else:
+            logger.error(f"❌ Webhook设置验证失败")
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Webhook设置失败: {e}")
+
+        # 如果是洪水限制，等待后重试一次
+        if "Flood control" in str(e) or "Too Many Requests" in str(e):
+            logger.warning("⚠️ 遇到洪水限制，等待10秒后重试...")
+            await asyncio.sleep(10)
+
+            try:
+                await bot.delete_webhook(drop_pending_updates=True)
+                await asyncio.sleep(2)
+                await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+                logger.info("✅ 重试Webhook设置成功")
+                return True
+            except Exception as retry_error:
+                logger.error(f"❌ Webhook重试失败: {retry_error}")
+
+        return False
+
 
 async def optimized_on_startup():
-    """优化版启动流程 - 支持模式切换"""
+    """优化版启动流程 - 修复洪水控制问题"""
     logger.info("🤖 机器人启动中...")
 
-    max_retries = 3
+    max_retries = 2  # 减少重试次数
     for attempt in range(max_retries):
         try:
-            # 并行执行启动任务
+            # 并行执行启动任务（除了Webhook）
             startup_tasks = [
                 db.initialize(),
                 preload_frequent_data(),
@@ -4195,13 +4229,18 @@ async def optimized_on_startup():
             if failed_tasks:
                 raise Exception(f"启动任务失败: {failed_tasks}")
 
-            # 设置Webhook（如果启用）
+            # 设置Webhook（如果启用）- 单独处理以避免影响其他启动任务
             webhook_success = await setup_webhook()
 
             if Config.should_use_webhook() and not webhook_success:
                 logger.warning("⚠️ Webhook设置失败，应用将在Polling模式下运行")
                 # 更新配置以使用Polling
                 Config.BOT_MODE = "polling"
+                # 确保删除Webhook
+                try:
+                    await bot.delete_webhook(drop_pending_updates=True)
+                except:
+                    pass
 
             logger.info("✅ 优化启动完成")
             return
@@ -4496,42 +4535,42 @@ async def polling_main():
 
 # 修改主函数以支持两种模式
 async def main():
-    """主启动函数 - 支持Webhook和Polling双模式"""
+    """主启动函数 - 简化版本避免重复启动"""
     if not check_environment():
         logger.error("❌ 环境检查失败")
         sys.exit(1)
 
+    # 立即设置Polling模式，避免Webhook问题
+    Config.BOT_MODE = "polling"  # 强制使用Polling模式
+
     try:
-        # 初始化数据库
         await db.initialize()
         logger.info("✅ 数据库初始化完成")
 
-        # 根据配置选择运行模式
-        if Config.should_use_webhook():
-            logger.info("🎯 使用 Webhook 模式")
-            await webhook_main()
-        else:
-            logger.info("🎯 使用 Polling 模式")
-            await polling_main()
+        # 使用简化的启动
+        await simple_on_startup()
+
+        # 直接使用Polling模式
+        logger.info("🚀 使用 Polling 模式运行")
+
+        # 启动必要的后台任务
+        essential_tasks = [
+            asyncio.create_task(memory_cleanup_task()),
+            asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
+        ]
+
+        logger.info(f"✅ 基础后台任务已启动: {len(essential_tasks)} 个任务")
+
+        # 启动轮询
+        await dp.start_polling(bot, skip_updates=True)
 
     except KeyboardInterrupt:
         logger.info("👋 收到中断信号，正在关闭...")
     except Exception as e:
         logger.error(f"💥 主程序异常: {e}")
-        # 尝试发送错误通知给管理员
-        try:
-            for admin_id in Config.ADMINS:
-                await bot.send_message(admin_id, f"🤖 机器人异常崩溃:\n{str(e)}")
-        except:
-            pass
         raise
     finally:
-        # 确保资源清理
-        try:
-            await optimized_on_shutdown()
-        except Exception as e:
-            logger.error(f"❌ 关闭过程中出错: {e}")
-
+        # 清理资源
         try:
             await db.close()
             logger.info("✅ 数据库连接已关闭")
@@ -4539,6 +4578,25 @@ async def main():
             logger.error(f"❌ 关闭数据库连接失败: {e}")
 
         logger.info("🎉 程序安全退出")
+
+
+async def simple_on_startup():
+    """简化版启动流程"""
+    logger.info("🔧 执行简化启动...")
+
+    # 删除Webhook，确保使用Polling模式
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ 已确认使用Polling模式")
+    except Exception as e:
+        logger.warning(f"⚠️ 删除Webhook失败: {e}")
+
+    # 预加载必要数据
+    try:
+        await preload_frequent_data()
+        logger.info("✅ 数据预加载完成")
+    except Exception as e:
+        logger.warning(f"⚠️ 数据预加载失败: {e}")
 
 
 async def polling_main():
