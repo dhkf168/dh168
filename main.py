@@ -4620,6 +4620,11 @@ async def main():
             logger.info("✅ 数据库连接已关闭")
         except Exception as e:
             logger.error(f"❌ 关闭数据库连接失败: {e}")
+        try:
+            await bot.session.close()
+            logger.info("✅ 已安全关闭 aiohttp ClientSession（bot.session）")
+        except Exception as e:
+            logger.warning(f"⚠️ 关闭 bot.session 失败: {e}")
 
         logger.info("🎉 程序安全退出")
 
