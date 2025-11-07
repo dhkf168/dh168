@@ -26,4 +26,5 @@ COPY . .
 ENV PORT=10000
 EXPOSE 10000
 
-CMD ["python", "main.py"]
+# ✅ 修改：使用 render_deploy.py 作为启动文件
+CMD ["python", "render_deploy.py"]
