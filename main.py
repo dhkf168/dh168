@@ -306,8 +306,8 @@ class MessageFormatter:
             f"✅ {MessageFormatter.format_copyable_text(time_str)} 回座打卡成功\n"
             f"📝 活动：{MessageFormatter.format_copyable_text(activity)}\n"
             f"⏱️ 本次活动耗时：{MessageFormatter.format_copyable_text(elapsed_time)}\n"
-            f"📊 今日累计{MessageFormatter.format_copyable_text(activity)}时间：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
-            f"📈 今日总计时：{MessageFormatter.format_copyable_text(total_time)}\n"
+            f"📈 今日累计{MessageFormatter.format_copyable_text(activity)}时间：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
+            f"📊 今日总计时：{MessageFormatter.format_copyable_text(total_time)}\n"
         )
 
         if is_overtime:
@@ -321,7 +321,7 @@ class MessageFormatter:
 
         for act, count in activity_counts.items():
             if count > 0:
-                message += f"🔢 本日{MessageFormatter.format_copyable_text(act)}次数：{MessageFormatter.format_copyable_text(str(count))} 次\n"
+                message += f"🔹 本日{MessageFormatter.format_copyable_text(act)}次数：{MessageFormatter.format_copyable_text(str(count))} 次\n"
 
         message += f"\n📊 今日总活动次数：{MessageFormatter.format_copyable_text(str(total_count))} 次"
 
@@ -498,11 +498,44 @@ async def calculate_work_fine(checkin_type: str, late_minutes: float) -> int:
 
 
 async def reset_daily_data_if_needed(chat_id: int, uid: int):
-    """优化版每日数据重置"""
-    today = str(get_beijing_time().date())
-    user_data = await db.get_user_cached(chat_id, uid)
+    """
+    改进版每日数据重置：
+    按群组设定的 reset_hour/minute 作为“统计日”边界。
+    例如重置时间为 9:00，则计算周期为：
+    今天 9:00 ~ 明天 9:00。
+    """
+    now = get_beijing_time()
 
-    if user_data and user_data["last_updated"] != today:
+    # 获取群组自定义重置时间
+    group_info = await db.get_group(chat_id)
+    reset_hour = group_info.get("reset_hour", Config.DAILY_RESET_HOUR)
+    reset_minute = group_info.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+    reset_time_today = now.replace(
+        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+    )
+    if now < reset_time_today:
+        # 当前时间还没到今天的重置点 → 统计周期起点应是昨天的重置时间
+        period_start = reset_time_today - timedelta(days=1)
+    else:
+        # 已经过了今天的重置点 → 当前周期起点为今天的重置时间
+        period_start = reset_time_today
+
+    user_data = await db.get_user_cached(chat_id, uid)
+    if not user_data:
+        return
+
+    last_updated_str = user_data.get("last_updated")
+    if not last_updated_str:
+        return
+
+    try:
+        last_updated_date = datetime.fromisoformat(str(last_updated_str))
+    except Exception:
+        last_updated_date = datetime.strptime(str(last_updated_str), "%Y-%m-%d")
+
+    # 判断是否跨过重置周期
+    if last_updated_date.date() < period_start.date():
         await db.reset_user_daily_data(chat_id, uid)
 
 
@@ -510,7 +543,6 @@ async def check_activity_limit(chat_id: int, uid: int, act: str):
     """检查活动次数是否达到上限"""
     await db.init_group(chat_id)
     await db.init_user(chat_id, uid)
-    await reset_daily_data_if_needed(chat_id, uid)
 
     current_count = await db.get_user_activity_count(chat_id, uid, act)
     max_times = await db.get_activity_max_times(act)
@@ -3086,9 +3118,17 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
         if is_overtime and overtime_seconds > 0:
             fine_amount = await calculate_fine(act, overtime_minutes)
 
+        # 添加调试日志 - 记录活动完成前的计数
+        current_count_before = await db.get_user_activity_count(chat_id, uid, act)
+        logger.info(f"🔍 [回座前] 用户{uid} 活动{act} 当前计数: {current_count_before}")
+
         await db.complete_user_activity(
             chat_id, uid, act, int(elapsed), fine_amount, is_overtime
         )
+
+        # 添加调试日志 - 记录活动完成后的计数
+        current_count_after = await db.get_user_activity_count(chat_id, uid, act)
+        logger.info(f"🔍 [回座后] 用户{uid} 活动{act} 新计数: {current_count_after}")
 
     key = f"{chat_id}-{uid}"
     await safe_cancel_task(key)
@@ -3098,6 +3138,10 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
     activity_counts = {
         act: info.get("count", 0) for act, info in user_activities.items()
     }
+
+    # 添加调试日志 - 显示最终的活动计数
+    final_count = activity_counts.get(act, 0)
+    logger.info(f"🔍 [最终显示] 用户{uid} 活动{act} 显示计数: {final_count}")
 
     await message.answer(
         MessageFormatter.format_back_message(
