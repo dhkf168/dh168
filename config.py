@@ -9,11 +9,11 @@ beijing_tz = timezone(timedelta(hours=8))
 
 class Config:
     # Bot 配置
-    TOKEN = os.getenv("BOT_TOKEN", "8144712657:AAEU3edVjMs8kt9OC8jQiIZMnRErjSs1TPo")
+    TOKEN = os.getenv("BOT_TOKEN", "")
 
     # 数据库配置
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
+        "DATABASE_URL", ""
     )
 
     # 性能优化配置
@@ -377,3 +377,4 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
+
