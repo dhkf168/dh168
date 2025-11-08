@@ -34,6 +34,7 @@ from database import PostgreSQLDatabase as AsyncDatabase
 from heartbeat import heartbeat_manager
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from notification_recovery import notification_recovery_manager
 
 
 # 性能监控工具
@@ -61,6 +62,9 @@ logger = logging.getLogger("GroupCheckInBot")
 # 禁用过于详细的日志
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+# 🧱 防重入全局表，防止重复点击导致多次回座
+active_back_processing: dict[str, bool] = {}
 
 # 初始化优化数据库
 db = AsyncDatabase()
@@ -305,14 +309,14 @@ class MessageFormatter:
             f"{first_line}\n"
             f"✅ {MessageFormatter.format_copyable_text(time_str)} 回座打卡成功\n"
             f"📝 活动：{MessageFormatter.format_copyable_text(activity)}\n"
-            f"⏱️ 本次活动耗时：{MessageFormatter.format_copyable_text(elapsed_time)}\n"
+            f"⏳ 本次活动耗时：{MessageFormatter.format_copyable_text(elapsed_time)}\n"
             f"📈 今日累计{MessageFormatter.format_copyable_text(activity)}时间：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
             f"📊 今日总计时：{MessageFormatter.format_copyable_text(total_time)}\n"
         )
 
         if is_overtime:
             overtime_time = MessageFormatter.format_time(int(overtime_seconds))
-            message += f"⚠️ 警告：您本次的活动已超时！\n超时时间：{MessageFormatter.format_copyable_text(overtime_time)}\n"
+            message += f"⚠️ 警告：您本次的活动已超时！\n 🚨 超时时间：{MessageFormatter.format_copyable_text(overtime_time)}\n"
             if fine_amount > 0:
                 message += f"💸 罚款：{MessageFormatter.format_copyable_text(str(fine_amount))} 元\n"
 
@@ -688,11 +692,255 @@ async def safe_cancel_task(key: str):
 
 async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
     """优化的活动定时提醒任务"""
+    
+    async def _activity_timer_inner():
+        """定时器内部逻辑 - 集成通知调度和恢复机制"""
+        one_minute_warning_sent = False
+        timeout_immediate_sent = False
+        timeout_5min_sent = False
+        last_reminder_minute = 0
+
+        while True:
+            user_lock = get_user_lock(chat_id, uid)
+            async with user_lock:
+                user_data = await db.get_user_cached(chat_id, uid)
+                if not user_data or user_data["current_activity"] != act:
+                    break
+
+                start_time = datetime.fromisoformat(user_data["activity_start_time"])
+                elapsed = (get_beijing_time() - start_time).total_seconds()
+                remaining = limit * 60 - elapsed
+
+                nickname = user_data.get("nickname", str(uid))
+
+            # 1分钟前警告 - 集成通知调度
+            if 0 < remaining <= 60 and not one_minute_warning_sent:
+                # 调度1分钟警告通知
+                scheduled_time = get_beijing_time() + timedelta(seconds=remaining)
+                await notification_recovery_manager.schedule_notification(
+                    chat_id, uid, act, "1min_warning", scheduled_time
+                )
+                
+                warning_msg = (
+                    f"⏳ <b>即将超时警告</b>\n"
+                    f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+                    f"❌ 您本次 {MessageFormatter.format_copyable_text(act)} 还有 <code>1</code> 分钟即将超时！\n"
+                    f"💡 请及时回座，避免超时罚款"
+                )
+                # 创建回座按钮
+                back_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="👉 点击✅立即回座 👈",
+                                callback_data=f"quick_back:{chat_id}:{uid}",
+                            )
+                        ]
+                    ]
+                )
+                await bot.send_message(
+                    chat_id, warning_msg, parse_mode="HTML", reply_markup=back_keyboard
+                )
+                
+                # 标记通知已发送
+                await notification_recovery_manager.mark_notification_sent(
+                    chat_id, uid, act, "1min_warning"
+                )
+                
+                one_minute_warning_sent = True
+
+            # 超时提醒 - 集成通知调度
+            if remaining <= 0:
+                overtime_minutes = int(-remaining // 60)
+
+                if overtime_minutes == 0 and not timeout_immediate_sent:
+                    # 调度立即超时通知
+                    scheduled_time = get_beijing_time()
+                    await notification_recovery_manager.schedule_notification(
+                        chat_id, uid, act, "timeout_immediate", scheduled_time
+                    )
+                    
+                    timeout_msg = (
+                        f"⚠️ <b>超时警告</b>\n"
+                        f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+                        f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经<code>超时</code>！\n"
+                        f"💢 请立即回座，避免产生更多罚款！"
+                    )
+                    # 创建回座按钮
+                    back_keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="👉 点击✅立即回座 👈",
+                                    callback_data=f"quick_back:{chat_id}:{uid}",
+                                )
+                            ]
+                        ]
+                    )
+
+                    await bot.send_message(
+                        chat_id, timeout_msg, parse_mode="HTML", reply_markup=back_keyboard
+                    )
+                    
+                    # 标记通知已发送
+                    await notification_recovery_manager.mark_notification_sent(
+                        chat_id, uid, act, "timeout_immediate"
+                    )
+                    
+                    timeout_immediate_sent = True
+                    last_reminder_minute = 0
+
+                elif overtime_minutes == 5 and not timeout_5min_sent:
+                    # 调度5分钟超时通知
+                    scheduled_time = get_beijing_time() + timedelta(minutes=5)
+                    await notification_recovery_manager.schedule_notification(
+                        chat_id, uid, act, "timeout_5min", scheduled_time
+                    )
+                    
+                    timeout_msg = (
+                        f"🔔 <b>超时警告</b>\n"
+                        f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+                        f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经超时 <code>5</code> 分钟！\n"
+                        f"💢 请立即回座，避免罚款增加！"
+                    )
+                    # 创建回座按钮
+                    back_keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="👉 点击✅立即回座 👈",
+                                    callback_data=f"quick_back:{chat_id}:{uid}",
+                                )
+                            ]
+                        ]
+                    )
+                    await bot.send_message(
+                        chat_id, timeout_msg, parse_mode="HTML", reply_markup=back_keyboard
+                    )
+                    
+                    # 标记通知已发送
+                    await notification_recovery_manager.mark_notification_sent(
+                        chat_id, uid, act, "timeout_5min"
+                    )
+                    
+                    timeout_5min_sent = True
+                    last_reminder_minute = 5
+
+                elif (
+                    overtime_minutes >= 10
+                    and overtime_minutes % 10 == 0
+                    and overtime_minutes > last_reminder_minute
+                ):
+                    # 调度定期超时通知
+                    notification_type = f"timeout_{overtime_minutes}min"
+                    scheduled_time = get_beijing_time() + timedelta(minutes=overtime_minutes)
+                    await notification_recovery_manager.schedule_notification(
+                        chat_id, uid, act, notification_type, scheduled_time
+                    )
+                    
+                    timeout_msg = (
+                        f"🚨 <b>超时警告</b>\n"
+                        f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+                        f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经超时 <code>{overtime_minutes}</code> 分钟！\n"
+                        f"💢 请立即回座！"
+                    )
+                    # 创建回座按钮
+                    back_keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="👉 点击✅立即回座 👈",
+                                    callback_data=f"quick_back:{chat_id}:{uid}",
+                                )
+                            ]
+                        ]
+                    )
+                    await bot.send_message(
+                        chat_id, timeout_msg, parse_mode="HTML", reply_markup=back_keyboard
+                    )
+                    
+                    # 标记通知已发送
+                    await notification_recovery_manager.mark_notification_sent(
+                        chat_id, uid, act, notification_type
+                    )
+                    
+                    last_reminder_minute = overtime_minutes
+
+            # 检查超时强制回座
+            user_lock = get_user_lock(chat_id, uid)
+            async with user_lock:
+                user_data = await db.get_user_cached(chat_id, uid)
+                if user_data and user_data["current_activity"] == act:
+
+                    if remaining <= -120 * 60:
+                        overtime_minutes = 120
+                        overtime_seconds = 120 * 60
+
+                        fine_amount = await calculate_fine(act, overtime_minutes)
+
+                        elapsed = (
+                            get_beijing_time()
+                            - datetime.fromisoformat(user_data["activity_start_time"])
+                        ).total_seconds()
+
+                        await db.complete_user_activity(
+                            chat_id, uid, act, int(elapsed), fine_amount, True
+                        )
+
+                        auto_back_msg = (
+                            f"🛑 <b>自动安全回座</b>\n"
+                            f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+                            f"📝 活动：<code>{act}</code>\n"
+                            f"⚠️ 由于超时超过2小时，系统已自动为您回座\n"
+                            f"⏰ 超时时长：<code>120</code> 分钟\n"
+                            f"💰 本次罚款：<code>{fine_amount}</code> 元\n"
+                            f"💢 请检查是否忘记回座！"
+                        )
+                        await bot.send_message(chat_id, auto_back_msg, parse_mode="HTML")
+
+                        try:
+                            chat_title = str(chat_id)
+                            try:
+                                chat_info = await bot.get_chat(chat_id)
+                                chat_title = chat_info.title or chat_title
+                            except Exception:
+                                pass
+
+                            notif_text = (
+                                f"🚨 <b>自动回座超时通知</b>\n"
+                                f"🏢 群组：<code>{chat_title}</code>\n"
+                                f"----------------------------------------\n"
+                                f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+                                f"📝 活动：<code>{act}</code>\n"
+                                f"⏰ 回座时间：<code>{get_beijing_time().strftime('%m/%d %H:%M:%S')}</code>\n"
+                                f"⏱️ 超时时长：<code>120</code> 分钟\n"
+                                f"💰 本次罚款：<code>{fine_amount}</code> 元\n"
+                                f"🔔 类型：系统自动回座（超时2小时强制）"
+                            )
+                            await NotificationService.send_notification(chat_id, notif_text)
+
+                        except Exception as e:
+                            logger.error(f"发送自动回座通知失败: {e}")
+
+                        # 清理相关的通知状态
+                        try:
+                            await notification_recovery_manager.mark_notification_sent(
+                                chat_id, uid, act, "auto_back_2hour"
+                            )
+                        except Exception as e:
+                            logger.warning(f"清理通知状态失败: {e}")
+
+                        await safe_cancel_task(f"{chat_id}-{uid}")
+                        break
+
+            await asyncio.sleep(30)
+    
+    # 主函数逻辑
     try:
         key = f"{chat_id}-{uid}"
         # 使用内存感知的任务管理器创建任务
         timer_task = await task_manager.create_task(
-            _activity_timer_inner(chat_id, uid, act, limit), name=f"timer_{key}"
+            _activity_timer_inner(), name=f"timer_{key}"
         )
         tasks[key] = timer_task
         await timer_task  # 等待任务完成
@@ -703,190 +951,106 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
         logger.error(f"定时器错误: {e}")
 
 
-async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
-    """定时器内部逻辑 - 原有的 activity_timer 内容移动到这里"""
-    one_minute_warning_sent = False
-    timeout_immediate_sent = False
-    timeout_5min_sent = False
-    last_reminder_minute = 0
-
-    while True:
-        user_lock = get_user_lock(chat_id, uid)
-        async with user_lock:
-            user_data = await db.get_user_cached(chat_id, uid)
-            if not user_data or user_data["current_activity"] != act:
-                break
-
-            start_time = datetime.fromisoformat(user_data["activity_start_time"])
-            elapsed = (get_beijing_time() - start_time).total_seconds()
-            remaining = limit * 60 - elapsed
-
-            nickname = user_data.get("nickname", str(uid))
-
-        # 1分钟前警告
-        if 0 < remaining <= 60 and not one_minute_warning_sent:
-            warning_msg = (
-                f"⏳ <b>即将超时警告</b>\n"
-                f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
-                f"❌ 您本次 {MessageFormatter.format_copyable_text(act)} 还有 <code>1</code> 分钟即将超时！\n"
-                f"💡 请及时回座，避免超时罚款"
+# 在 notification_recovery.py 中修改
+async def send_recovery_notification(self, notification: Dict[str, Any]) -> bool:
+    """发送恢复通知 - 改为公有方法"""
+    try:
+        from main import bot, MessageFormatter  # 避免循环导入
+        
+        chat_id = notification['chat_id']
+        user_id = notification['user_id']
+        activity = notification['activity_name']
+        notification_type = notification['notification_type']
+        
+        # 获取用户数据
+        user_data = await db.get_user_cached(chat_id, user_id)
+        if not user_data:
+            return False
+            
+        nickname = user_data.get('nickname', str(user_id))
+        
+        # 根据通知类型发送不同的恢复消息
+        if notification_type == "1min_warning":
+            message = (
+                f"🔄 <b>系统恢复提醒</b>\n"
+                f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+                f"⏰ 您本次 {MessageFormatter.format_copyable_text(activity)} 还有 <code>1</code> 分钟即将超时！\n"
+                f"💡 请及时回座，避免超时罚款\n"
+                f"📝 <i>（系统恢复后自动补发）</i>"
             )
-            # 创建回座按钮
-            back_keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="👉 点击✅立即回座 👈",
-                            callback_data=f"quick_back:{chat_id}:{uid}",
-                        )
-                    ]
-                ]
+            
+        elif notification_type == "timeout_immediate":
+            message = (
+                f"🔄 <b>系统恢复提醒</b>\n"
+                f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+                f"❌ 您的 {MessageFormatter.format_copyable_text(activity)} 已经<code>超时</code>！\n"
+                f"💢 请立即回座，避免产生更多罚款！\n"
+                f"📝 <i>（系统恢复后自动补发）</i>"
             )
-            await bot.send_message(
-                chat_id, warning_msg, parse_mode="HTML", reply_markup=back_keyboard
+            
+        elif notification_type == "timeout_5min":
+            message = (
+                f"🔄 <b>系统恢复提醒</b>\n"
+                f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+                f"❌ 您的 {MessageFormatter.format_copyable_text(activity)} 已经超时 <code>5</code> 分钟！\n"
+                f"💢 请立即回座，避免罚款增加！\n"
+                f"📝 <i>（系统恢复后自动补发）</i>"
             )
-            one_minute_warning_sent = True
-
-        # 超时提醒
-        if remaining <= 0:
-            overtime_minutes = int(-remaining // 60)
-
-            if overtime_minutes == 0 and not timeout_immediate_sent:
-                timeout_msg = (
-                    f"⚠️ <b>超时警告</b>\n"
-                    f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
-                    f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经<code>超时</code>！\n"
-                    f"💢 请立即回座，避免产生更多罚款！"
+            
+        elif notification_type.startswith("timeout_") and notification_type.endswith("min"):
+            # 处理定期超时通知（如 timeout_10min, timeout_20min 等）
+            try:
+                timeout_minutes = notification_type.replace("timeout_", "").replace("min", "")
+                message = (
+                    f"🔄 <b>系统恢复提醒</b>\n"
+                    f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+                    f"❌ 您的 {MessageFormatter.format_copyable_text(activity)} 已经超时 <code>{timeout_minutes}</code> 分钟！\n"
+                    f"💢 请立即回座！\n"
+                    f"📝 <i>（系统恢复后自动补发）</i>"
                 )
-                # 创建回座按钮
-                back_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="👉 点击✅立即回座 👈",
-                                callback_data=f"quick_back:{chat_id}:{uid}",
-                            )
-                        ]
-                    ]
+            except:
+                # 如果解析分钟数失败，使用通用消息
+                message = (
+                    f"🔄 <b>系统恢复提醒</b>\n"
+                    f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+                    f"⚠️ 您的 {MessageFormatter.format_copyable_text(activity)} 已严重超时！\n"
+                    f"💡 请立即回座\n"
+                    f"📝 <i>（系统恢复后自动补发）</i>"
                 )
-
-                await bot.send_message(
-                    chat_id, timeout_msg, parse_mode="HTML", reply_markup=back_keyboard
+        else:
+            # 通用超时提醒
+            message = (
+                f"🔄 <b>系统恢复提醒</b>\n"
+                f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+                f"⚠️ 您的 {MessageFormatter.format_copyable_text(activity)} 已超时！\n"
+                f"💡 请及时回座\n"
+                f"📝 <i>（系统恢复后自动补发）</i>"
+            )
+        
+        # 创建回座按钮
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        back_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="👉 点击✅立即回座 👈",
+                    callback_data=f"quick_back:{chat_id}:{user_id}"
                 )
-                timeout_immediate_sent = True
-                last_reminder_minute = 0
-
-            elif overtime_minutes == 5 and not timeout_5min_sent:
-                timeout_msg = (
-                    f"🔔 <b>超时警告</b>\n"
-                    f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
-                    f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经超时 <code>5</code> 分钟！\n"
-                    f"💢 请立即回座，避免罚款增加！"
-                )
-                # 创建回座按钮
-                back_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="👉 点击✅立即回座 👈",
-                                callback_data=f"quick_back:{chat_id}:{uid}",
-                            )
-                        ]
-                    ]
-                )
-                await bot.send_message(
-                    chat_id, timeout_msg, parse_mode="HTML", reply_markup=back_keyboard
-                )
-                timeout_5min_sent = True
-                last_reminder_minute = 5
-
-            elif (
-                overtime_minutes >= 10
-                and overtime_minutes % 10 == 0
-                and overtime_minutes > last_reminder_minute
-            ):
-                timeout_msg = (
-                    f"🚨 <b>超时警告</b>\n"
-                    f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
-                    f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经超时 <code>{overtime_minutes}</code> 分钟！\n"
-                    f"💢 请立即回座！"
-                )
-                # 创建回座按钮
-                back_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="👉 点击✅立即回座 👈",
-                                callback_data=f"quick_back:{chat_id}:{uid}",
-                            )
-                        ]
-                    ]
-                )
-                await bot.send_message(
-                    chat_id, timeout_msg, parse_mode="HTML", reply_markup=back_keyboard
-                )
-                last_reminder_minute = overtime_minutes
-
-        # 检查超时强制回座
-        user_lock = get_user_lock(chat_id, uid)
-        async with user_lock:
-            user_data = await db.get_user_cached(chat_id, uid)
-            if user_data and user_data["current_activity"] == act:
-
-                if remaining <= -120 * 60:
-                    overtime_minutes = 120
-                    overtime_seconds = 120 * 60
-
-                    fine_amount = await calculate_fine(act, overtime_minutes)
-
-                    elapsed = (
-                        get_beijing_time()
-                        - datetime.fromisoformat(user_data["activity_start_time"])
-                    ).total_seconds()
-
-                    await db.complete_user_activity(
-                        chat_id, uid, act, int(elapsed), fine_amount, True
-                    )
-
-                    auto_back_msg = (
-                        f"🛑 <b>自动安全回座</b>\n"
-                        f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
-                        f"📝 活动：<code>{act}</code>\n"
-                        f"⚠️ 由于超时超过2小时，系统已自动为您回座\n"
-                        f"⏰ 超时时长：<code>120</code> 分钟\n"
-                        f"💰 本次罚款：<code>{fine_amount}</code> 元\n"
-                        f"💢 请检查是否忘记回座！"
-                    )
-                    await bot.send_message(chat_id, auto_back_msg, parse_mode="HTML")
-
-                    try:
-                        chat_title = str(chat_id)
-                        try:
-                            chat_info = await bot.get_chat(chat_id)
-                            chat_title = chat_info.title or chat_title
-                        except Exception:
-                            pass
-
-                        notif_text = (
-                            f"🚨 <b>自动回座超时通知</b>\n"
-                            f"🏢 群组：<code>{chat_title}</code>\n"
-                            f"----------------------------------------\n"
-                            f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
-                            f"📝 活动：<code>{act}</code>\n"
-                            f"⏰ 回座时间：<code>{get_beijing_time().strftime('%m/%d %H:%M:%S')}</code>\n"
-                            f"⏱️ 超时时长：<code>120</code> 分钟\n"
-                            f"💰 本次罚款：<code>{fine_amount}</code> 元\n"
-                            f"🔔 类型：系统自动回座（超时2小时强制）"
-                        )
-                        await NotificationService.send_notification(chat_id, notif_text)
-
-                    except Exception as e:
-                        logger.error(f"发送自动回座通知失败: {e}")
-
-                    await safe_cancel_task(f"{chat_id}-{uid}")
-                    break
-
-        await asyncio.sleep(30)
+            ]]
+        )
+        
+        await bot.send_message(
+            chat_id, 
+            message, 
+            parse_mode="HTML", 
+            reply_markup=back_keyboard
+        )
+        
+        logger.info(f"✅ 已补发遗漏通知: 用户{user_id} 活动{activity} 类型{notification_type}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ 发送恢复通知失败: {e}")
+        return False
 
 
 # ==================== 核心打卡功能优化 ====================
@@ -2309,9 +2473,9 @@ async def cmd_refresh_keyboard(message: types.Message):
 
 @dp.callback_query(lambda c: c.data.startswith("quick_back:"))
 async def handle_quick_back(callback_query: types.CallbackQuery):
-    """处理快速回座按钮"""
+    """处理快速回座按钮（带过期保护与异常恢复）"""
     try:
-        # 解析回调数据
+        # 🧭 解析回调数据
         data_parts = callback_query.data.split(":")
         if len(data_parts) < 3:
             await callback_query.answer("❌ 数据格式错误", show_alert=True)
@@ -2322,24 +2486,28 @@ async def handle_quick_back(callback_query: types.CallbackQuery):
 
         logger.info(f"🔔 快速回座按钮被点击: chat_id={chat_id}, uid={uid}")
 
-        # 检查是否是用户本人点击
+        # 🚧 检查消息是否过期（Telegram 限制 10 分钟）
+        msg_ts = callback_query.message.date.timestamp()
+        if time.time() - msg_ts > 600:
+            await callback_query.answer("⚠️ 此按钮已过期，请重新输入 /回座", show_alert=True)
+            return
+
+        # ✅ 检查是否是用户本人点击
         if callback_query.from_user.id != uid:
             await callback_query.answer("❌ 这不是您的回座按钮！", show_alert=True)
             return
 
-        # 执行回座逻辑
+        # ✅ 执行回座逻辑
         user_lock = get_user_lock(chat_id, uid)
         async with user_lock:
-            # 检查用户是否有活动在进行
             user_data = await db.get_user_cached(chat_id, uid)
-            if not user_data or not user_data["current_activity"]:
+            if not user_data or not user_data.get("current_activity"):
                 await callback_query.answer("❌ 您当前没有活动在进行", show_alert=True)
                 return
 
-            # 直接调用回座逻辑
             await _process_back_locked(callback_query.message, chat_id, uid)
 
-        # 更新按钮状态（移除按钮）
+        # ✅ 更新按钮状态（尝试移除按钮，但失败时忽略）
         try:
             await callback_query.message.edit_reply_markup(reply_markup=None)
         except Exception as e:
@@ -2348,8 +2516,12 @@ async def handle_quick_back(callback_query: types.CallbackQuery):
         await callback_query.answer("✅ 已成功回座")
 
     except Exception as e:
+        # 捕获任何异常，防止任务崩溃
         logger.error(f"❌ 快速回座失败: {e}")
-        await callback_query.answer("❌ 回座失败，请手动输入'回座'", show_alert=True)
+        try:
+            await callback_query.answer("❌ 回座失败，请手动输入 /回座", show_alert=True)
+        except Exception:
+            pass  # 避免再次抛出 BadRequest
 
 
 # ============ 上下班打卡指令优化 =================
@@ -2872,11 +3044,12 @@ async def handle_admin_panel_button(message: types.Message):
         "• /setfine <活动名> <时间段> <金额> - 设置活动罚款费率\n"
         "• /setfines_all <t1> <f1> [<t2> <f2> ...] - 为所有活动统一设置分段罚款\n"
         "• /setworkfine <work_start|work_end> <时间段> <金额> - 设置上下班罚款\n"
+        "• \n"
         "• /showsettings - 查看当前群设置\n"
+        "• \n"
         "• /exportmonthly - 导出月度数据\n"
         "• /exportmonthly 2024 1 - 导出指定年月数据\n"
         "• /export - 导出数据\n\n"
-        "点击下方按钮进行操作："
     )
     await message.answer(admin_text, reply_markup=get_admin_keyboard())
 
@@ -3091,116 +3264,169 @@ async def show_rank(message: types.Message):
 
 
 # ==================== 回座功能优化 ====================
-async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
-    """线程安全的回座逻辑 - 优化版本"""
-    now = get_beijing_time()
 
-    async with OptimizedUserContext(chat_id, uid) as user_data:
-        if not user_data["current_activity"]:
+async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
+    """线程安全的回座逻辑（防重入 + 超时 + 日志优化）"""
+    start_time = time.time()
+    key = f"{chat_id}:{uid}"
+
+    # 🚧 防重入检测
+    if active_back_processing.get(key):
+        await message.answer("⚠️ 您的回座请求正在处理中，请稍候。")
+        logger.warning(f"⏳ 阻止重复回座: chat_id={chat_id}, uid={uid}")
+        return
+    active_back_processing[key] = True
+
+    try:
+        logger.info(f"🔧 开始回座处理: chat_id={chat_id}, uid={uid}")
+
+        # ✅ 整体超时保护（防止Supabase或网络阻塞）
+        async def core_process():
+            now = get_beijing_time()
+
+            async with OptimizedUserContext(chat_id, uid) as user_data:
+                if not user_data.get("current_activity"):
+                    await message.answer(
+                        Config.MESSAGES["no_activity"],
+                        reply_markup=await get_main_keyboard(
+                            chat_id=chat_id, show_admin=await is_admin(uid)
+                        ),
+                    )
+                    return
+
+                act = user_data["current_activity"]
+                start_time_dt = datetime.fromisoformat(user_data["activity_start_time"])
+                elapsed = (now - start_time_dt).total_seconds()
+
+                # ✅ 带超时的数据库操作
+                try:
+                    time_limit_minutes = await asyncio.wait_for(
+                        db.get_activity_time_limit(act), timeout=8
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"⏰ 获取活动时长超时: {act}")
+                    time_limit_minutes = Config.DEFAULT_ACTIVITY_LIMIT_MINUTES
+
+                time_limit_seconds = time_limit_minutes * 60
+                is_overtime = elapsed > time_limit_seconds
+                overtime_seconds = max(0, int(elapsed - time_limit_seconds))
+                overtime_minutes = overtime_seconds / 60
+
+                fine_amount = 0
+                if is_overtime and overtime_seconds > 0:
+                    try:
+                        fine_amount = await asyncio.wait_for(
+                            calculate_fine(act, overtime_minutes),
+                            timeout=5,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"💸 计算罚款超时: act={act}")
+
+                # 记录活动计数前后变化
+                try:
+                    before_count = await asyncio.wait_for(
+                        db.get_user_activity_count(chat_id, uid, act), timeout=8
+                    )
+                    logger.info(f"🔍 [回座前] 用户{uid} 活动{act} 计数: {before_count}")
+                except Exception as e:
+                    logger.warning(f"计数查询失败: {e}")
+                    before_count = 0
+
+                # ✅ 安全更新活动状态
+                await asyncio.wait_for(
+                    db.complete_user_activity(
+                        chat_id, uid, act, int(elapsed), fine_amount, is_overtime
+                    ),
+                    timeout=10,
+                )
+
+                after_count = await db.get_user_activity_count(chat_id, uid, act)
+                logger.info(f"🔍 [回座后] 用户{uid} 活动{act} 新计数: {after_count}")
+
+            # 🔄 取消旧计时任务
+            await safe_cancel_task(f"{chat_id}-{uid}")
+
+            # ✅ 读取用户最新数据
+            user_data = await asyncio.wait_for(db.get_user_cached(chat_id, uid), timeout=10)
+            user_activities = await asyncio.wait_for(
+                db.get_user_all_activities(chat_id, uid), timeout=10
+            )
+            activity_counts = {
+                a: i.get("count", 0) for a, i in user_activities.items()
+            }
+
+            # 生成回座信息
             await message.answer(
-                Config.MESSAGES["no_activity"],
+                MessageFormatter.format_back_message(
+                    user_id=uid,
+                    user_name=user_data["nickname"],
+                    activity=act,
+                    time_str=now.strftime("%m/%d %H:%M:%S"),
+                    elapsed_time=MessageFormatter.format_time(int(elapsed)),
+                    total_activity_time=MessageFormatter.format_time(
+                        int(user_activities.get(act, {}).get("time", 0))
+                    ),
+                    total_time=MessageFormatter.format_time(
+                        int(user_data["total_accumulated_time"])
+                    ),
+                    activity_counts=activity_counts,
+                    total_count=user_data["total_activity_count"],
+                    is_overtime=is_overtime,
+                    overtime_seconds=overtime_seconds,
+                    fine_amount=fine_amount,
+                ),
                 reply_markup=await get_main_keyboard(
                     chat_id=chat_id, show_admin=await is_admin(uid)
                 ),
+                parse_mode="HTML",
             )
-            return
 
-        act = user_data["current_activity"]
-        start_time = datetime.fromisoformat(user_data["activity_start_time"])
-        elapsed = (now - start_time).total_seconds()
+            # ✅ 超时通知推送（容错）
+            if is_overtime:
+                try:
+                    chat_title = str(chat_id)
+                    try:
+                        chat_info = await bot.get_chat(chat_id)
+                        chat_title = chat_info.title or chat_title
+                    except Exception as e:
+                        logger.warning(f"无法获取群组信息: {e}")
 
-        time_limit_seconds = await db.get_activity_time_limit(act) * 60
-        is_overtime = elapsed > time_limit_seconds
-        overtime_seconds = max(0, int(elapsed - time_limit_seconds))
-        overtime_minutes = overtime_seconds / 60
+                    notif_text = (
+                        f"🚨 <b>超时回座通知</b>\n"
+                        f"🏢 群组：<code>{chat_title}</code>\n"
+                        f"---------------------------------------\n"
+                        f"👤 用户：{MessageFormatter.format_user_link(uid, user_data['nickname'])}\n"
+                        f"📝 活动：<code>{act}</code>\n"
+                        f"⏰ 回座时间：<code>{now.strftime('%m/%d %H:%M:%S')}</code>\n"
+                        f"⏱️ 超时：<code>{MessageFormatter.format_time(int(overtime_seconds))}</code>\n"
+                        f"💰 罚款：<code>{fine_amount}</code> 元"
+                    )
+                    await asyncio.wait_for(
+                        NotificationService.send_notification(chat_id, notif_text),
+                        timeout=8,
+                    )
+                except Exception as e:
+                    logger.error(f"⚠️ 超时通知推送异常: {e}")
 
-        fine_amount = 0
-        if is_overtime and overtime_seconds > 0:
-            fine_amount = await calculate_fine(act, overtime_minutes)
+        # 整体逻辑超时保护（防止单协程死锁）
+        await asyncio.wait_for(core_process(), timeout=60)
 
-        # 添加调试日志 - 记录活动完成前的计数
-        current_count_before = await db.get_user_activity_count(chat_id, uid, act)
-        logger.info(f"🔍 [回座前] 用户{uid} 活动{act} 当前计数: {current_count_before}")
+    except asyncio.TimeoutError:
+        logger.error(f"⏰ 回座逻辑整体超时: chat_id={chat_id}, uid={uid}")
+        await message.answer("⚠️ 回座操作超时，请稍后重试。")
 
-        await db.complete_user_activity(
-            chat_id, uid, act, int(elapsed), fine_amount, is_overtime
-        )
-
-        # 添加调试日志 - 记录活动完成后的计数
-        current_count_after = await db.get_user_activity_count(chat_id, uid, act)
-        logger.info(f"🔍 [回座后] 用户{uid} 活动{act} 新计数: {current_count_after}")
-
-    key = f"{chat_id}-{uid}"
-    await safe_cancel_task(key)
-
-    user_data = await db.get_user_cached(chat_id, uid)
-    user_activities = await db.get_user_all_activities(chat_id, uid)
-    activity_counts = {
-        act: info.get("count", 0) for act, info in user_activities.items()
-    }
-
-    # 添加调试日志 - 显示最终的活动计数
-    final_count = activity_counts.get(act, 0)
-    logger.info(f"🔍 [最终显示] 用户{uid} 活动{act} 显示计数: {final_count}")
-
-    await message.answer(
-        MessageFormatter.format_back_message(
-            user_id=uid,
-            user_name=user_data["nickname"],
-            activity=act,
-            time_str=now.strftime("%m/%d %H:%M:%S"),
-            elapsed_time=MessageFormatter.format_time(int(elapsed)),
-            total_activity_time=MessageFormatter.format_time(
-                int(user_activities.get(act, {}).get("time", 0))
-            ),
-            total_time=MessageFormatter.format_time(
-                int(user_data["total_accumulated_time"])
-            ),
-            activity_counts=activity_counts,
-            total_count=user_data["total_activity_count"],
-            is_overtime=is_overtime,
-            overtime_seconds=overtime_seconds,
-            fine_amount=fine_amount,
-        ),
-        reply_markup=await get_main_keyboard(
-            chat_id=chat_id, show_admin=await is_admin(uid)
-        ),
-        parse_mode="HTML",
-    )
-
-    if is_overtime:
+    except Exception as e:
+        logger.error(f"💥 回座处理异常: {e}", exc_info=True)
         try:
-            chat_title = str(chat_id)
-            try:
-                chat_info = await bot.get_chat(chat_id)
-                chat_title = chat_info.title or chat_title
-            except Exception as e:
-                logger.warning(f"无法获取群组信息: {e}")
+            await message.answer("❌ 回座失败，请稍后重试。")
+        except Exception:
+            pass
 
-            # 修复：使用精确的秒数计算超时时间
-            overtime_minutes_total = overtime_seconds / 60
-            overtime_minutes_int = int(overtime_minutes_total)
-            overtime_seconds_remaining = int(
-                (overtime_minutes_total - overtime_minutes_int) * 60
-            )
-
-            overtime_display = f"{overtime_minutes_int}分{overtime_seconds_remaining}秒"
-
-            notif_text = (
-                f"🚨 <b>超时回座通知</b>\n"
-                f"🏢 群组：<code>{chat_title}</code>\n"
-                f"---------------------------------------\n"
-                f"👤 用户名称：{MessageFormatter.format_user_link(uid, user_data['nickname'])}\n"
-                f"📝 活动内容：<code>{act}</code>\n"
-                f"⏰ 回座时间：<code>{now.strftime('%m/%d %H:%M:%S')}</code>\n"
-                f"⏱️ 超时时长：<code>{MessageFormatter.format_time(int(overtime_seconds))}</code> \n"
-                f"💰 本次罚款：<code>{fine_amount}</code> 元"
-            )
-
-            await NotificationService.send_notification(chat_id, notif_text)
-
-        except Exception as e:
-            logger.error(f"⚠️ 超时通知推送异常: {e}")
+    finally:
+        # ✅ 释放防重入锁
+        active_back_processing.pop(key, None)
+        duration = round(time.time() - start_time, 2)
+        logger.info(f"✅ 回座结束 chat_id={chat_id}, uid={uid}，耗时 {duration}s")
 
 
 async def process_back(message: types.Message):
@@ -3730,59 +3956,184 @@ async def daily_reset_task():
 
 
 async def auto_daily_export_task():
-    """每天重置前自动导出群组数据 - 优化版本"""
+    """每天重置前自动导出群组数据（增强版）"""
     while True:
         now = get_beijing_time()
         logger.info(f"🕒 自动导出任务运行中，当前时间: {now}")
 
-        all_groups = await db.get_all_groups()
+        try:
+            # ✅ 1. 增加超时与重试保护
+            all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=15)
+            if not all_groups:
+                logger.warning("⚠️ 未获取到任何群组，10秒后重试。")
+                await asyncio.sleep(10)
+                continue
+        except asyncio.TimeoutError:
+            logger.error("⏰ 数据库查询超时（get_all_groups），将在30秒后重试。")
+            await asyncio.sleep(30)
+            continue
+        except Exception as e:
+            logger.error(f"❌ 获取群组列表失败: {e}")
+            await asyncio.sleep(30)
+            continue
+
         export_executed = False
 
         for chat_id in all_groups:
             try:
-                group_data = await db.get_group_cached(chat_id)
+                # ✅ 每个群组独立超时保护（防止单群卡死）
+                group_data = await asyncio.wait_for(db.get_group_cached(chat_id), timeout=10)
                 if not group_data:
                     continue
 
                 reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
                 reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # 方案1: 23:59固定导出（所有群组）
+                # 方案1: 23:59固定导出
                 if now.hour == 23 and now.minute == 59:
-                    logger.info(f"📤 23:59自动导出，正在导出群组 {chat_id} 的数据...")
-                    await export_and_push_csv(chat_id)
-                    logger.info(f"✅ 23:59自动导出完成：群组 {chat_id}")
+                    logger.info(f"📤 23:59自动导出群组 {chat_id} 数据中...")
+                    await asyncio.wait_for(export_and_push_csv(chat_id), timeout=30)
+                    logger.info(f"✅ 群组 {chat_id} 导出成功 (23:59)")
                     export_executed = True
 
-                # 方案2: 重置时间前1分钟导出
+                # 方案2: 重置前1分钟导出
                 else:
-                    # 计算重置前1分钟的时间
                     reset_time = now.replace(
                         hour=reset_hour, minute=reset_minute, second=0, microsecond=0
                     )
                     export_time = reset_time - timedelta(minutes=1)
 
-                    # 如果当前时间在导出时间范围内（精确匹配）
-                    if (
-                        now.hour == export_time.hour
-                        and now.minute == export_time.minute
-                    ):
-                        logger.info(
-                            f"📤 到达重置前1分钟导出时间，正在导出群组 {chat_id} 的数据..."
-                        )
-                        await export_and_push_csv(chat_id)
-                        logger.info(f"✅ 重置前导出完成：群组 {chat_id}")
+                    if now.hour == export_time.hour and now.minute == export_time.minute:
+                        logger.info(f"📤 到达重置前导出时间，导出群组 {chat_id} ...")
+                        await asyncio.wait_for(export_and_push_csv(chat_id), timeout=30)
+                        logger.info(f"✅ 群组 {chat_id} 导出成功 (重置前)")
                         export_executed = True
 
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ 群组 {chat_id} 导出或查询超时，跳过此群。")
             except Exception as e:
-                logger.error(f"❌ 自动导出失败 {chat_id}: {e}")
+                logger.error(f"❌ 自动导出失败，群组 {chat_id}: {e}")
 
-        if export_executed:
-            # 如果执行了导出，等待2分钟避免重复执行
-            await asyncio.sleep(120)
-        else:
-            # 如果没有执行任何导出，等待1分钟再检查
-            await asyncio.sleep(60)
+        # ✅ 导出完成后的等待策略
+        sleep_time = 120 if export_executed else 60
+        logger.info(f"🕐 导出循环结束，休眠 {sleep_time}s ...")
+        await asyncio.sleep(sleep_time)
+
+
+# ==================== 活动状态恢复功能 ====================
+async def restore_activity_timers():
+    """启动时恢复所有进行中的活动定时器"""
+    logger.info("🔄 恢复进行中的活动定时器...")
+
+    try:
+        # 获取所有有进行中活动的用户
+        conn = await db.get_connection()
+        try:
+            rows = await conn.fetch(
+                "SELECT chat_id, user_id, current_activity, activity_start_time, nickname FROM users WHERE current_activity IS NOT NULL AND activity_start_time IS NOT NULL"
+            )
+        finally:
+            await db.release_connection(conn)
+
+        restored_count = 0
+        expired_count = 0
+
+        for row in rows:
+            chat_id = row["chat_id"]
+            user_id = row["user_id"]
+            activity = row["current_activity"]
+            start_time_str = row["activity_start_time"]
+            nickname = row["nickname"] or str(user_id)
+
+            try:
+                # 计算已过去的时间
+                start_time = datetime.fromisoformat(start_time_str)
+                now = get_beijing_time()
+                elapsed = (now - start_time).total_seconds()
+
+                # 获取活动时间限制
+                time_limit = await db.get_activity_time_limit(activity)
+                time_limit_seconds = time_limit * 60
+                remaining_time = time_limit_seconds - elapsed
+
+                if remaining_time > 60:  # 剩余时间大于1分钟才恢复
+                    # 还有剩余时间，恢复定时器
+                    key = f"{chat_id}-{user_id}"
+                    await safe_cancel_task(key)  # 清理可能存在的旧任务
+
+                    # 重新创建定时器
+                    timer_task = await task_manager.create_task(
+                        activity_timer(chat_id, user_id, activity, time_limit),
+                        name=f"activity_timer_{key}",
+                    )
+                    tasks[key] = timer_task
+
+                    logger.info(
+                        f"✅ 恢复定时器: 用户{user_id}({nickname}) 活动{activity} 剩余{remaining_time/60:.1f}分钟"
+                    )
+                    restored_count += 1
+
+                else:
+                    # 剩余时间不足或已超时，自动结束活动
+                    await handle_expired_activity(
+                        chat_id, user_id, activity, start_time, nickname
+                    )
+                    expired_count += 1
+
+            except Exception as e:
+                logger.error(f"❌ 恢复用户{user_id}活动失败: {e}")
+
+        logger.info(
+            f"📊 定时器恢复完成: {restored_count}个活动已恢复, {expired_count}个活动已自动结束"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ 恢复活动定时器失败: {e}")
+
+
+async def handle_expired_activity(
+    chat_id: int, user_id: int, activity: str, start_time: datetime, nickname: str
+):
+    """处理已过期的活动"""
+    try:
+        now = get_beijing_time()
+        elapsed = (now - start_time).total_seconds()
+
+        # 计算超时和罚款
+        time_limit_seconds = await db.get_activity_time_limit(activity) * 60
+        overtime_seconds = max(0, int(elapsed - time_limit_seconds))
+        overtime_minutes = overtime_seconds / 60
+
+        fine_amount = 0
+        if overtime_seconds > 0:
+            fine_amount = await calculate_fine(activity, overtime_minutes)
+
+        # 自动完成活动
+        await db.complete_user_activity(
+            chat_id, user_id, activity, int(elapsed), fine_amount, True
+        )
+
+        # 发送超时通知
+        timeout_msg = (
+            f"🔄 <b>系统恢复通知</b>\n"
+            f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+            f"📝 检测到未结束的活动：<code>{activity}</code>\n"
+            f"⚠️ 由于服务重启，您的活动已自动结束\n"
+            f"⏱️ 活动总时长：<code>{MessageFormatter.format_time(int(elapsed))}</code>"
+        )
+
+        if overtime_seconds > 0:
+            timeout_msg += f"\n⏰ 超时时长：<code>{MessageFormatter.format_time(int(overtime_seconds))}</code>"
+            if fine_amount > 0:
+                timeout_msg += f"\n💰 超时罚款：<code>{fine_amount}</code> 元"
+
+        await bot.send_message(chat_id, timeout_msg, parse_mode="HTML")
+        logger.info(
+            f"✅ 自动结束过期活动: 用户{user_id}({nickname}) 活动{activity} 时长{elapsed:.0f}秒"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ 处理过期活动失败 用户{user_id}: {e}")
 
 
 # ==================== 月度报告任务优化 ====================
@@ -3925,17 +4276,31 @@ async def monthly_report_task():
 
 # ==================== 内存清理任务优化 ====================
 async def memory_cleanup_task():
-    """定期内存清理任务 - 优化版本"""
+    """定期内存清理任务 - 使用安全版本"""
     while True:
         try:
             await asyncio.sleep(Config.CLEANUP_INTERVAL)
             await performance_optimizer.memory_cleanup()
-            # 清理数据库旧数据
-            await db.cleanup_old_data(30)
+            
+            # 使用安全的清理方法
+            success = await db.safe_cleanup_old_data(30)
+            if not success:
+                logger.warning("⚠️ 数据库清理未执行，但不影响主要功能")
+                
         except Exception as e:
             logger.error(f"❌ 内存清理任务失败: {e}")
             await asyncio.sleep(300)
 
+async def notification_cleanup_task():
+    """定期清理通知记录任务"""
+    while True:
+        try:
+            await asyncio.sleep(24 * 60 * 60)  # 每天执行一次
+            await notification_recovery_manager.cleanup_old_notifications(7)  # 保留7天记录
+            logger.info("✅ 通知记录清理完成")
+        except Exception as e:
+            logger.error(f"❌ 通知清理任务失败: {e}")
+            await asyncio.sleep(3600)  # 出错时等待1小时
 
 async def health_monitoring_task():
     """健康监控任务 - 优化版本"""
@@ -4297,21 +4662,6 @@ async def optimized_on_startup():
             await asyncio.sleep(2**attempt)
 
 
-async def preload_frequent_data():
-    """预加载常用数据 - 优化版本"""
-    try:
-        # 并行预加载
-        preload_tasks = [
-            db.get_activity_limits_cached(),
-            db.get_push_settings(),
-            db.get_fine_rates(),
-        ]
-
-        await asyncio.gather(*preload_tasks)
-        logger.info("✅ 常用数据预加载完成")
-    except Exception as e:
-        logger.warning(f"⚠️ 预加载数据失败: {e}")
-
 
 async def optimized_on_shutdown():
     """优化版关闭流程"""
@@ -4591,6 +4941,13 @@ async def main():
         await db.initialize()
         logger.info("✅ 数据库初始化完成")
 
+        # 初始化心跳服务
+        try:
+            await heartbeat_manager.initialize()
+            logger.info("✅ 心跳管理器初始化完成")
+        except Exception as e:
+            logger.warning(f"⚠️ 初始化心跳管理器失败: {e}")
+
         # 使用简化的启动
         await simple_on_startup()
 
@@ -4601,6 +4958,7 @@ async def main():
         essential_tasks = [
             asyncio.create_task(memory_cleanup_task()),
             asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
+            asyncio.create_task(notification_cleanup_task()),  # 🆕 添加通知清理任务
         ]
 
         logger.info(f"✅ 基础后台任务已启动: {len(essential_tasks)} 个任务")
@@ -4625,12 +4983,17 @@ async def main():
             logger.info("✅ 已安全关闭 aiohttp ClientSession（bot.session）")
         except Exception as e:
             logger.warning(f"⚠️ 关闭 bot.session 失败: {e}")
+        try:
+            await heartbeat_manager.stop()
+            logger.info("✅ 心跳管理器已关闭")
+        except Exception as e:
+            logger.warning(f"⚠️ 关闭心跳管理器失败: {e}")
 
         logger.info("🎉 程序安全退出")
 
-
+# ==================== 修复缺失的函数 ====================
 async def simple_on_startup():
-    """简化版启动流程"""
+    """简化版启动流程 - 修复版本"""
     logger.info("🔧 执行简化启动...")
 
     # 删除Webhook，确保使用Polling模式
@@ -4646,6 +5009,41 @@ async def simple_on_startup():
         logger.info("✅ 数据预加载完成")
     except Exception as e:
         logger.warning(f"⚠️ 数据预加载失败: {e}")
+
+    # 🆕 初始化通知恢复管理器
+    try:
+        await notification_recovery_manager.initialize()
+        logger.info("✅ 通知恢复管理器初始化完成")
+    except Exception as e:
+        logger.error(f"❌ 通知恢复管理器初始化失败: {e}")
+
+    # 🆕 恢复遗漏的通知
+    try:
+        await notification_recovery_manager.recover_missed_notifications()
+        logger.info("✅ 遗漏通知恢复完成")
+    except Exception as e:
+        logger.error(f"❌ 遗漏通知恢复失败: {e}")
+
+    # 恢复活动定时器
+    try:
+        await restore_activity_timers()
+    except Exception as e:
+        logger.error(f"❌ 恢复定时器失败: {e}")
+
+async def preload_frequent_data():
+    """预加载常用数据"""
+    try:
+        # 并行预加载
+        preload_tasks = [
+            db.get_activity_limits_cached(),
+            db.get_push_settings(),
+            db.get_fine_rates(),
+        ]
+
+        await asyncio.gather(*preload_tasks)
+        logger.info("✅ 常用数据预加载完成")
+    except Exception as e:
+        logger.warning(f"⚠️ 预加载数据失败: {e}")
 
 
 async def polling_main():
