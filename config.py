@@ -9,11 +9,11 @@ beijing_tz = timezone(timedelta(hours=8))
 
 class Config:
     # Bot 配置
-    TOKEN = os.getenv("BOT_TOKEN", "")
+    TOKEN = os.getenv("BOT_TOKEN", "8301902909:AAG9FVqGgvntWNYNgbIrYROXrfFMlM0PRkA")
 
     # 数据库配置
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", ""
+        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
     )
 
     # 性能优化配置
@@ -53,7 +53,7 @@ class Config:
     DB_MIN_CONNECTIONS = int(os.getenv("DB_MIN_CONNECTIONS", "2"))
     DB_MAX_CONNECTIONS = int(os.getenv("DB_MAX_CONNECTIONS", "20"))
     DB_CONNECTION_TIMEOUT = int(os.getenv("DB_CONNECTION_TIMEOUT", "30"))
-    DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+    DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 
     # 数据库健康检查配置
     DB_HEALTH_CHECK_ENABLED = (
@@ -377,4 +377,3 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
-
