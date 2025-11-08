@@ -9,11 +9,11 @@ beijing_tz = timezone(timedelta(hours=8))
 
 class Config:
     # Bot 配置
-    TOKEN = os.getenv("BOT_TOKEN", "8301902909:AAG9FVqGgvntWNYNgbIrYROXrfFMlM0PRkA")
+    TOKEN = os.getenv("BOT_TOKEN", "")
 
     # 数据库配置
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
+        "DATABASE_URL", ""
     )
 
     # 性能优化配置
@@ -85,7 +85,7 @@ class Config:
     SAVE_DELAY = 3.0
     MAX_CONCURRENT_LOCKS = 5000
     MAX_MEMORY_USERS = 10000
-    CLEANUP_INTERVAL = 3600
+    CLEANUP_INTERVAL = 360
 
     # 数据保留配置
     DATA_RETENTION_DAYS = 35
