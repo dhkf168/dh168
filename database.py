@@ -2,7 +2,7 @@
 import logging
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Dict, Any, List, Optional
 from config import Config
 import asyncpg
@@ -1325,41 +1325,33 @@ class PostgreSQLDatabase:
             return rankings
 
     # ========== 数据清理 ==========
+
     async def cleanup_old_data(self, days: int = 30):
-        """清理旧数据 - 增强错误处理版本"""
+        """清理旧数据 - 修复版（防止 str 传入 asyncpg）"""
         try:
             cutoff_date = (datetime.now() - timedelta(days=days)).date()
-            cutoff_date_str = str(cutoff_date)
-
-            logger.info(f"🔄 开始清理 {days} 天前的数据，截止日期: {cutoff_date_str}")
+            logger.info(
+                f"🔄 开始清理 {days} 天前的数据，截止日期: {cutoff_date.isoformat()}"
+            )
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    # 清理用户活动记录
-                    result1 = await conn.execute(
-                        "DELETE FROM user_activities WHERE activity_date < $1",
-                        cutoff_date_str,
+                    # ✅ 关键修复：传入 cutoff_date（date对象），不再用字符串
+                    await conn.execute(
+                        "DELETE FROM user_activities WHERE activity_date < $1::date",
+                        cutoff_date,
+                    )
+                    await conn.execute(
+                        "DELETE FROM work_records WHERE record_date < $1::date",
+                        cutoff_date,
+                    )
+                    await conn.execute(
+                        "DELETE FROM users WHERE last_updated < $1::date", cutoff_date
                     )
 
-                    # 清理上下班记录
-                    result2 = await conn.execute(
-                        "DELETE FROM work_records WHERE record_date < $1",
-                        cutoff_date_str,
-                    )
-
-                    # 清理用户数据（只清理last_updated早于截止日期的）
-                    result3 = await conn.execute(
-                        "DELETE FROM users WHERE last_updated < $1", cutoff_date_str
-                    )
-
-                logger.info(f"✅ 已清理 {days} 天前的数据")
-                logger.debug(
-                    f"清理结果: user_activities={result1}, work_records={result2}, users={result3}"
-                )
-
+            logger.info(f"✅ 成功清理超过 {days} 天的数据")
         except Exception as e:
             logger.error(f"❌ 清理旧数据失败: {e}")
-            # 重新抛出异常，让调用者处理
             raise
 
     async def safe_cleanup_old_data(self, days: int = 30) -> bool:
