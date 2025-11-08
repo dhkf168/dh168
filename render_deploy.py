@@ -84,13 +84,20 @@ async def initialize_services():
     await heartbeat_manager.initialize()
     logger.info("✅ Heartbeat initialized")
 
+    # 🆕 初始化通知恢复服务
+    await notification_recovery_manager.initialize()
+    logger.info("✅ Notification recovery initialized")
+
     # ✅ 删除 webhook（Render 免费版无法用 Webhook）
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("✅ Webhook deleted → switching to polling mode")
 
-    # 🆕 执行启动流程（这会调用 restore_activity_timers）
-    from main import simple_on_startup
+    # 🆕 恢复遗漏的通知
+    await notification_recovery_manager.recover_missed_notifications()
+    logger.info("✅ Missed notifications recovery completed")
 
+    # 🆕 执行启动流程
+    from main import simple_on_startup
     await simple_on_startup()
     logger.info("✅ All services initialized with activity recovery")
 
@@ -112,35 +119,6 @@ async def start_background_tasks():
     asyncio.create_task(notification_cleanup_task())  # 🆕 添加通知清理任务
 
     logger.info("✅ All background tasks started")
-
-
-async def initialize_services():
-    logger.info("🔄 Initializing services...")
-
-    # ✅ 初始化数据库
-    await db.initialize()
-    logger.info("✅ Database initialized")
-
-    # ✅ 初始化心跳服务
-    await heartbeat_manager.initialize()
-    logger.info("✅ Heartbeat initialized")
-
-    # 🆕 初始化通知恢复服务
-    await notification_recovery_manager.initialize()
-    logger.info("✅ Notification recovery initialized")
-
-    # ✅ 删除 webhook（Render 免费版无法用 Webhook）
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("✅ Webhook deleted → switching to polling mode")
-
-    # 🆕 恢复遗漏的通知
-    await notification_recovery_manager.recover_missed_notifications()
-    logger.info("✅ Missed notifications recovery completed")
-
-    # 🆕 执行启动流程
-    from main import simple_on_startup
-    await simple_on_startup()
-    logger.info("✅ All services initialized with activity recovery")
 
 
 # ===========================
