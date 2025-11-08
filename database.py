@@ -1368,6 +1368,15 @@ class PostgreSQLDatabase:
             # 重新抛出异常，让调用者处理
             raise
 
+    async def safe_cleanup_old_data(self, days: int = 30) -> bool:
+        """安全清理旧数据 - 不会抛出异常，适合在定时任务中使用"""
+        try:
+            await self.cleanup_old_data(days)
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ 安全清理数据失败（不影响主要功能）: {e}")
+            return False
+
     async def manage_monthly_data(self):
         """月度数据管理"""
         try:
