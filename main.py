@@ -478,26 +478,23 @@ async def is_admin(uid):
 
 
 async def calculate_work_fine(checkin_type: str, late_minutes: float) -> int:
-    """计算上下班迟到早退罚款金额"""
+    """根据分钟阈值动态计算上下班罚款金额"""
     work_fine_rates = await db.get_work_fine_rates_for_type(checkin_type)
     if not work_fine_rates:
         return 0
 
+    # 转换键为整数并排序
+    thresholds = sorted([int(k) for k in work_fine_rates.keys() if str(k).isdigit()])
     late_minutes_abs = abs(late_minutes)
 
-    # 分段计算罚款
-    if late_minutes_abs <= 0:
-        return 0
-    elif late_minutes_abs <= 60:
-        return work_fine_rates.get("60", 50)
-    elif late_minutes_abs <= 120:
-        return work_fine_rates.get("120", 100)
-    elif late_minutes_abs <= 180:
-        return work_fine_rates.get("180", 200)
-    elif late_minutes_abs <= 240:
-        return work_fine_rates.get("240", 300)
-    else:
-        return work_fine_rates.get("max", 500)
+    applicable_fine = 0
+    for threshold in thresholds:
+        if late_minutes_abs >= threshold:
+            applicable_fine = work_fine_rates[str(threshold)]
+        else:
+            break
+
+    return applicable_fine
 
 
 async def reset_daily_data_if_needed(chat_id: int, uid: int):
@@ -1508,82 +1505,57 @@ async def cmd_setfines_all(message: types.Message):
 @admin_required
 @rate_limit(rate=3, per=30)
 async def cmd_setworkfine(message: types.Message):
-    """设置上下班罚款费率 - 优化版本"""
+    """
+    设置上下班罚款规则
+    用法：
+    /setworkfine work_start 1 100 10 200 30 500
+    表示：
+        迟到1分钟以上罚100，
+        迟到10分钟以上罚200，
+        迟到30分钟以上罚500
+    """
     args = message.text.split()
-    if len(args) != 4:
+    if len(args) < 4 or len(args) % 2 != 0:
         await message.answer(
-            "❌ 用法：/setworkfine <work_start|work_end> <时间段> <金额>\n"
-            "例如：/setworkfine work_start 60 50 （设置上班迟到1小时内罚款50元）\n"
-            "时间段：60(1小时), 120(2小时), 180(3小时), 240(4小时), max(4小时以上)",
-            reply_markup=await get_main_keyboard(
-                chat_id=message.chat.id, show_admin=True
-            ),
+            "❌ 用法错误\n正确格式：/setworkfine <work_start|work_end> <分钟1> <罚款1> [分钟2 罚款2 ...]",
+            reply_markup=get_admin_keyboard(),
         )
         return
 
+    checkin_type = args[1]
+    if checkin_type not in ["work_start", "work_end"]:
+        await message.answer(
+            "❌ 类型必须是 work_start 或 work_end",
+            reply_markup=get_admin_keyboard(),
+        )
+        return
+
+    # 解析分钟阈值和罚款金额
+    fine_segments = {}
     try:
-        checkin_type = args[1]
-        time_segment = args[2]
-        fine_amount = int(args[3])
+        for i in range(2, len(args), 2):
+            minute = int(args[i])
+            amount = int(args[i + 1])
+            fine_segments[str(minute)] = amount
 
-        if checkin_type not in ["work_start", "work_end"]:
-            await message.answer(
-                "❌ 类型错误！请使用 work_start（上班）或 work_end（下班）",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-            )
-            return
+        # 更新数据库配置（重写整个罚款配置）
+        await db.clear_work_fine_rates(checkin_type)
+        for minute_str, fine_amount in fine_segments.items():
+            await db.update_work_fine_rate(checkin_type, minute_str, fine_amount)
 
-        if time_segment not in ["60", "120", "180", "240", "max"]:
-            await message.answer(
-                "❌ 时间段错误！请使用：60, 120, 180, 240, max",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-            )
-            return
-
-        if fine_amount < 0:
-            await message.answer(
-                "❌ 罚款金额不能为负数！",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-            )
-            return
-
-        await db.update_work_fine_config(checkin_type, time_segment, fine_amount)
-        type_text = "上班迟到" if checkin_type == "work_start" else "下班早退"
-        time_text = {
-            "60": "1小时内",
-            "120": "1-2小时",
-            "180": "2-3小时",
-            "240": "3-4小时",
-            "max": "4小时以上",
-        }[time_segment]
-
-        await message.answer(
-            f"✅ 已设置{type_text}{time_text}罚款为 <code>{fine_amount}</code> 元",
-            reply_markup=await get_main_keyboard(
-                chat_id=message.chat.id, show_admin=True
-            ),
-            parse_mode="HTML",
+        segments_text = "\n".join(
+            [f"⏰ 超过 {m} 分钟 → 💰 {a} 元" for m, a in fine_segments.items()]
         )
 
-    except ValueError:
         await message.answer(
-            "❌ 请输入有效的数字！",
-            reply_markup=await get_main_keyboard(
-                chat_id=message.chat.id, show_admin=True
-            ),
+            f"✅ 已设置 {checkin_type} 的罚款规则：\n{segments_text}",
+            reply_markup=get_admin_keyboard(),
         )
+
     except Exception as e:
         await message.answer(
             f"❌ 设置失败：{e}",
-            reply_markup=await get_main_keyboard(
-                chat_id=message.chat.id, show_admin=True
-            ),
+            reply_markup=get_admin_keyboard(),
         )
 
 
@@ -2328,7 +2300,9 @@ async def handle_quick_back(callback_query: types.CallbackQuery):
         # 🚧 检查消息是否过期（Telegram 限制 10 分钟）
         msg_ts = callback_query.message.date.timestamp()
         if time.time() - msg_ts > 600:
-            await callback_query.answer("⚠️ 此按钮已过期，请重新输入 /回座", show_alert=True)
+            await callback_query.answer(
+                "⚠️ 此按钮已过期，请重新输入 /回座", show_alert=True
+            )
             return
 
         # ✅ 检查是否是用户本人点击
@@ -2358,7 +2332,9 @@ async def handle_quick_back(callback_query: types.CallbackQuery):
         # 捕获任何异常，防止任务崩溃
         logger.error(f"❌ 快速回座失败: {e}")
         try:
-            await callback_query.answer("❌ 回座失败，请手动输入 /回座", show_alert=True)
+            await callback_query.answer(
+                "❌ 回座失败，请手动输入 /回座", show_alert=True
+            )
         except Exception:
             pass  # 避免再次抛出 BadRequest
 
@@ -3104,6 +3080,7 @@ async def show_rank(message: types.Message):
 
 # ==================== 回座功能优化 ====================
 
+
 async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
     """线程安全的回座逻辑（防重入 + 超时 + 日志优化）"""
     start_time = time.time()
@@ -3186,13 +3163,13 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
             await safe_cancel_task(f"{chat_id}-{uid}")
 
             # ✅ 读取用户最新数据
-            user_data = await asyncio.wait_for(db.get_user_cached(chat_id, uid), timeout=10)
+            user_data = await asyncio.wait_for(
+                db.get_user_cached(chat_id, uid), timeout=10
+            )
             user_activities = await asyncio.wait_for(
                 db.get_user_all_activities(chat_id, uid), timeout=10
             )
-            activity_counts = {
-                a: i.get("count", 0) for a, i in user_activities.items()
-            }
+            activity_counts = {a: i.get("count", 0) for a, i in user_activities.items()}
 
             # 生成回座信息
             await message.answer(
@@ -3758,8 +3735,28 @@ async def export_data_before_reset(chat_id: int):
         logger.error(f"❌ 自动导出数据失败：{e}")
 
 
+async def delayed_export(chat_id: int, delay_minutes: int = 30):
+    """在每日重置后延迟导出昨日数据"""
+    try:
+        logger.info(f"⏳ 群组 {chat_id} 将在 {delay_minutes} 分钟后导出昨日数据...")
+        await asyncio.sleep(delay_minutes * 60)
+
+        # 计算昨天日期（使用 get_beijing_time 保持与项目时区一致）
+        yesterday = get_beijing_time() - timedelta(days=1)
+        file_name = f"group_{chat_id}_statistics_{yesterday.strftime('%Y%m%d')}.csv"
+
+        # 导出并推送（使用已有函数 export_and_push_csv）
+        await export_and_push_csv(
+            chat_id, to_admin_if_no_group=True, file_name=file_name
+        )
+
+        logger.info(f"✅ 群组 {chat_id} 昨日数据导出并推送完成")
+    except Exception as e:
+        logger.error(f"❌ 群组 {chat_id} 延迟导出昨日数据失败: {e}")
+
+
 async def daily_reset_task():
-    """每日自动重置任务 - 优化版本"""
+    """每日自动重置任务 - 延迟导出版本"""
     while True:
         now = get_beijing_time()
         logger.info(f"🔄 重置任务检查，当前时间: {now}")
@@ -3773,11 +3770,12 @@ async def daily_reset_task():
             reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
             reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
+            # 检查是否到达重置时间
             if now.hour == reset_hour and now.minute == reset_minute:
                 try:
                     logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id} 的数据...")
-                    await export_data_before_reset(chat_id)
 
+                    # 1️⃣ 执行每日数据重置
                     group_members = await db.get_group_members(chat_id)
                     for user_data in group_members:
                         user_lock = get_user_lock(chat_id, user_data["user_id"])
@@ -3788,9 +3786,14 @@ async def daily_reset_task():
 
                     logger.info(f"✅ 群组 {chat_id} 数据重置完成")
 
+                    # 2️⃣ 启动延迟导出任务（30 或 60 分钟后导出昨天数据）
+                    delay_minutes = 30  # 你可以改成 60
+                    asyncio.create_task(delayed_export(chat_id, delay_minutes))
+
                 except Exception as e:
                     logger.error(f"❌ 重置群组 {chat_id} 失败: {e}")
 
+        # 每分钟检查一次
         await asyncio.sleep(60)
 
 
@@ -3821,7 +3824,9 @@ async def auto_daily_export_task():
         for chat_id in all_groups:
             try:
                 # ✅ 每个群组独立超时保护（防止单群卡死）
-                group_data = await asyncio.wait_for(db.get_group_cached(chat_id), timeout=10)
+                group_data = await asyncio.wait_for(
+                    db.get_group_cached(chat_id), timeout=10
+                )
                 if not group_data:
                     continue
 
@@ -3842,7 +3847,10 @@ async def auto_daily_export_task():
                     )
                     export_time = reset_time - timedelta(minutes=1)
 
-                    if now.hour == export_time.hour and now.minute == export_time.minute:
+                    if (
+                        now.hour == export_time.hour
+                        and now.minute == export_time.minute
+                    ):
                         logger.info(f"📤 到达重置前导出时间，导出群组 {chat_id} ...")
                         await asyncio.wait_for(export_and_push_csv(chat_id), timeout=30)
                         logger.info(f"✅ 群组 {chat_id} 导出成功 (重置前)")
@@ -4120,12 +4128,12 @@ async def memory_cleanup_task():
         try:
             await asyncio.sleep(Config.CLEANUP_INTERVAL)
             await performance_optimizer.memory_cleanup()
-            
+
             # 使用安全的清理方法
             success = await db.safe_cleanup_old_data(30)
             if not success:
                 logger.warning("⚠️ 数据库清理未执行，但不影响主要功能")
-                
+
         except Exception as e:
             logger.error(f"❌ 内存清理任务失败: {e}")
             await asyncio.sleep(300)
@@ -4491,7 +4499,6 @@ async def optimized_on_startup():
             await asyncio.sleep(2**attempt)
 
 
-
 async def optimized_on_shutdown():
     """优化版关闭流程"""
     logger.info("🛑 机器人正在关闭...")
@@ -4844,6 +4851,7 @@ async def simple_on_startup():
         await restore_activity_timers()
     except Exception as e:
         logger.error(f"❌ 恢复定时器失败: {e}")
+
 
 async def preload_frequent_data():
     """预加载常用数据"""
