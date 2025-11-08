@@ -85,7 +85,7 @@ class Config:
     SAVE_DELAY = 3.0
     MAX_CONCURRENT_LOCKS = 5000
     MAX_MEMORY_USERS = 10000
-    CLEANUP_INTERVAL = 360
+    CLEANUP_INTERVAL = 3600
 
     # 数据保留配置
     DATA_RETENTION_DAYS = 35
@@ -377,3 +377,4 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
+
