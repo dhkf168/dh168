@@ -995,11 +995,45 @@ class PostgreSQLDatabase:
 
             return result
 
-    async def get_all_groups(self) -> List[int]:
-        """获取所有群组ID"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT chat_id FROM groups")
-            return [row["chat_id"] for row in rows]
+    async def get_all_groups(self, retries: int = 3, delay: float = 2.0) -> List[int]:
+        """
+        获取所有群组ID（带超时与自愈机制）
+        retries: 最大重试次数
+        delay: 每次失败后的基础等待秒数
+        """
+        for attempt in range(1, retries + 1):
+            try:
+                async with self.pool.acquire() as conn:
+                    # ✅ 增加超时保护（最多等待10秒）
+                    rows = await asyncio.wait_for(
+                        conn.fetch("SELECT chat_id FROM groups"),
+                        timeout=10
+                    )
+                    return [row["chat_id"] for row in rows]
+
+            except (asyncpg.InterfaceError,
+                    asyncpg.PostgresConnectionError,
+                    asyncio.TimeoutError) as e:
+                logger.warning(f"⚠️ 第 {attempt} 次获取群组失败: {e}")
+                
+                # ✅ 主动关闭可能失效的连接
+                try:
+                    await self.pool.close()
+                    logger.info("🔄 数据库连接池已重置")
+                except Exception as e2:
+                    logger.warning(f"重置连接池时出错: {e2}")
+
+                if attempt < retries:
+                    sleep_time = delay * attempt  # 指数退避
+                    logger.info(f"⏳ {sleep_time:.1f}s 后重试（第 {attempt} 次）...")
+                    await asyncio.sleep(sleep_time)
+                else:
+                    logger.error("❌ 重试次数耗尽，放弃操作。")
+                    return []
+
+            except Exception as e:
+                logger.error(f"💥 未知错误（get_all_groups）：{e}")
+                return []
 
     async def get_group_members(self, chat_id: int) -> List[Dict]:
         """获取群组成员"""
@@ -1268,21 +1302,40 @@ class PostgreSQLDatabase:
 
     # ========== 数据清理 ==========
     async def cleanup_old_data(self, days: int = 30):
-        """清理旧数据"""
-        cutoff_date = (datetime.now() - timedelta(days=days)).date()
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM user_activities WHERE activity_date < $1",
-                    str(cutoff_date),
-                )
-                await conn.execute(
-                    "DELETE FROM work_records WHERE record_date < $1", str(cutoff_date)
-                )
-                await conn.execute(
-                    "DELETE FROM users WHERE last_updated < $1", str(cutoff_date)
-                )
-            logger.info(f"✅ 已清理 {days} 天前的数据")
+        """清理旧数据 - 增强错误处理版本"""
+        try:
+            cutoff_date = (datetime.now() - timedelta(days=days)).date()
+            cutoff_date_str = str(cutoff_date)
+        
+            logger.info(f"🔄 开始清理 {days} 天前的数据，截止日期: {cutoff_date_str}")
+        
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    # 清理用户活动记录
+                    result1 = await conn.execute(
+                        "DELETE FROM user_activities WHERE activity_date < $1",
+                        cutoff_date_str,
+                    )
+                
+                    # 清理上下班记录
+                    result2 = await conn.execute(
+                        "DELETE FROM work_records WHERE record_date < $1", 
+                        cutoff_date_str
+                    )
+                
+                    # 清理用户数据（只清理last_updated早于截止日期的）
+                    result3 = await conn.execute(
+                        "DELETE FROM users WHERE last_updated < $1", 
+                        cutoff_date_str
+                    )
+                
+                logger.info(f"✅ 已清理 {days} 天前的数据")
+                logger.debug(f"清理结果: user_activities={result1}, work_records={result2}, users={result3}")
+            
+        except Exception as e:
+            logger.error(f"❌ 清理旧数据失败: {e}")
+            # 重新抛出异常，让调用者处理
+            raise
 
     async def manage_monthly_data(self):
         """月度数据管理"""
