@@ -4250,7 +4250,7 @@ async def start_web_server():
 async def get_active_users_count() -> int:
     """获取活跃用户数量（今日有活动的用户）"""
     try:
-        today = str(datetime.now(beijing_tz).date())
+        today = datetime.now(beijing_tz).date()
         conn = await db.get_connection()
         try:
             result = await conn.fetchval(
@@ -4894,3 +4894,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"💥 机器人异常退出: {e}")
         sys.exit(1)
+
