@@ -1027,8 +1027,6 @@ class PostgreSQLDatabase:
     async def get_all_groups(self, retries: int = 3, delay: float = 2.0) -> List[int]:
         """
         获取所有群组ID（带超时与自愈机制）
-        retries: 最大重试次数
-        delay: 每次失败后的基础等待秒数
         """
         for attempt in range(1, retries + 1):
             try:
@@ -1426,6 +1424,72 @@ class PostgreSQLDatabase:
             return f"{minutes}分{secs}秒"
         else:
             return f"{secs}秒"
+
+    # ========== 健康检查与监控 ==========
+    async def connection_health_check(self) -> bool:
+        """
+        数据库连接层面的健康检查
+        返回: True-连接健康, False-连接异常
+        """
+        if not self.pool:
+            logger.warning("⚠️ 数据库健康检查: 连接池未初始化")
+            return False
+
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchval("SELECT 1")
+                is_healthy = result == 1
+                if not is_healthy:
+                    logger.error("❌ 数据库健康检查: 查询返回异常结果")
+                else:
+                    logger.debug("✅ 数据库健康检查: 连接正常")
+                return is_healthy
+        except Exception as e:
+            logger.error(f"❌ 数据库健康检查失败: {e}")
+            return False
+
+    async def reconnect(self, max_retries: int = 3) -> bool:
+        """
+        重新连接数据库
+        返回: True-成功, False-失败
+        """
+        logger.warning("🔄 尝试重新连接数据库...")
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 关闭现有连接池
+                if self.pool:
+                    await self.pool.close()
+                    logger.debug("✅ 旧连接池已关闭")
+
+                # 重置状态
+                self.pool = None
+                self._initialized = False
+                self._cache.clear()
+                self._cache_ttl.clear()
+
+                # 重新初始化
+                await self.initialize()
+
+                # 验证重新连接是否成功
+                if await self.connection_health_check():
+                    logger.info(f"✅ 数据库重连成功 (第{attempt}次尝试)")
+                    return True
+                else:
+                    logger.warning(f"⚠️ 重连后健康检查失败 (第{attempt}次尝试)")
+
+            except Exception as e:
+                logger.error(f"❌ 数据库重连第{attempt}次尝试失败: {e}")
+
+                if attempt < max_retries:
+                    retry_delay = 2**attempt  # 指数退避
+                    logger.info(f"⏳ {retry_delay}秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"💥 数据库重连{max_retries}次后彻底失败")
+                    return False
+
+        return False
 
     @staticmethod
     def format_minutes_to_hm(minutes: float) -> str:
