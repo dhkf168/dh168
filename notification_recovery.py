@@ -1,4 +1,4 @@
-# notification_recovery.py - 遗漏通知恢复管理器（安全注入 pool 版本）
+# notification_recovery.py - 遗漏通知恢复管理器（时区安全 + 自动修复版）
 import asyncio
 import logging
 from datetime import datetime, timedelta
@@ -10,7 +10,7 @@ logger = logging.getLogger("GroupCheckInBot")
 
 
 class NotificationRecoveryManager:
-    """遗漏通知恢复管理器"""
+    """遗漏通知恢复管理器（已修复时区冲突问题）"""
 
     def __init__(self):
         self.enabled = True
@@ -18,6 +18,21 @@ class NotificationRecoveryManager:
         self._recovery_in_progress = False
         self.pool = None  # 数据库连接池，启动时注入
 
+    # =========================
+    # 🔧 工具函数
+    # =========================
+    def _ensure_naive(self, dt: datetime) -> datetime:
+        """确保 datetime 为无时区格式（用于 PostgreSQL TIMESTAMP）"""
+        if dt is None:
+            return None
+        # 如果是带时区的（aware），转为北京时间后去掉 tzinfo
+        if dt.tzinfo is not None:
+            return dt.astimezone(beijing_tz).replace(tzinfo=None)
+        return dt
+
+    # =========================
+    # 🔗 初始化
+    # =========================
     def set_pool(self, pool):
         """注入数据库连接池"""
         if pool is None:
@@ -85,6 +100,9 @@ class NotificationRecoveryManager:
                 ON notification_states (chat_id, user_id, activity_name)
             """)
 
+    # =========================
+    # 📅 调度通知
+    # =========================
     async def schedule_notification(
         self,
         chat_id: int,
@@ -98,6 +116,8 @@ class NotificationRecoveryManager:
             return
 
         try:
+            scheduled_time = self._ensure_naive(scheduled_time)
+
             async with self.pool.acquire() as conn:
                 await conn.execute("""
                     INSERT INTO notification_states 
@@ -112,6 +132,9 @@ class NotificationRecoveryManager:
         except Exception as e:
             logger.error(f"❌ 调度通知失败: {e}")
 
+    # =========================
+    # ✅ 标记通知已发送
+    # =========================
     async def mark_notification_sent(
         self,
         chat_id: int,
@@ -126,6 +149,8 @@ class NotificationRecoveryManager:
 
         try:
             sent_time = actual_sent_time or datetime.now(beijing_tz)
+            sent_time = self._ensure_naive(sent_time)
+
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     result = await conn.execute("""
@@ -146,6 +171,9 @@ class NotificationRecoveryManager:
         except Exception as e:
             logger.error(f"❌ 标记通知已发送失败: {e}")
 
+    # =========================
+    # 🔍 获取待处理通知
+    # =========================
     async def get_pending_notifications(self, recovery_window_minutes: int = None) -> List[Dict[str, Any]]:
         """获取待处理通知"""
         if not self.enabled or self.pool is None:
@@ -153,6 +181,7 @@ class NotificationRecoveryManager:
 
         window = recovery_window_minutes or self.recovery_window_minutes
         cutoff_time = datetime.now(beijing_tz) - timedelta(minutes=window)
+        cutoff_time = self._ensure_naive(cutoff_time)
 
         try:
             async with self.pool.acquire() as conn:
@@ -167,6 +196,9 @@ class NotificationRecoveryManager:
             logger.error(f"❌ 获取待处理通知失败: {e}")
             return []
 
+    # =========================
+    # ♻️ 恢复遗漏通知
+    # =========================
     async def recover_missed_notifications(self):
         """恢复遗漏通知"""
         if not self.enabled or self._recovery_in_progress or self.pool is None:
@@ -181,11 +213,14 @@ class NotificationRecoveryManager:
                 return
 
             recovery_count = 0
-            current_time = datetime.now(beijing_tz)
+            current_time = self._ensure_naive(datetime.now(beijing_tz))
 
             for notification in pending_notifications:
                 try:
                     scheduled_time = notification['scheduled_time']
+                    if isinstance(scheduled_time, datetime) and scheduled_time.tzinfo:
+                        scheduled_time = self._ensure_naive(scheduled_time)
+
                     time_diff = (current_time - scheduled_time).total_seconds() / 60
                     if 0 <= time_diff <= self.recovery_window_minutes:
                         success = await self._send_recovery_notification(notification)
@@ -196,7 +231,7 @@ class NotificationRecoveryManager:
                                 notification['user_id'],
                                 notification['activity_name'],
                                 notification['notification_type'],
-                                current_time
+                                datetime.now(beijing_tz)
                             )
                             await asyncio.sleep(0.5)
                 except Exception as e:
@@ -209,6 +244,9 @@ class NotificationRecoveryManager:
         finally:
             self._recovery_in_progress = False
 
+    # =========================
+    # 📤 发送恢复通知
+    # =========================
     async def _send_recovery_notification(self, notification: Dict[str, Any]) -> bool:
         """发送恢复通知"""
         try:
@@ -259,12 +297,10 @@ class NotificationRecoveryManager:
                 )
 
             back_keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="👉 点击✅立即回座 👈",
-                        callback_data=f"quick_back:{chat_id}:{user_id}"
-                    )
-                ]]
+                inline_keyboard=[[InlineKeyboardButton(
+                    text="👉 点击✅立即回座 👈",
+                    callback_data=f"quick_back:{chat_id}:{user_id}"
+                )]]
             )
 
             await bot.send_message(chat_id, message, parse_mode="HTML", reply_markup=back_keyboard)
@@ -274,13 +310,16 @@ class NotificationRecoveryManager:
             logger.error(f"❌ 发送恢复通知失败: {e}")
             return False
 
+    # =========================
+    # 🧹 清理旧通知记录
+    # =========================
     async def cleanup_old_notifications(self, days: int = 7):
         """清理旧通知记录"""
         if not self.enabled or self.pool is None:
             return
 
         try:
-            cutoff_date = datetime.now(beijing_tz) - timedelta(days=days)
+            cutoff_date = self._ensure_naive(datetime.now(beijing_tz) - timedelta(days=days))
             async with self.pool.acquire() as conn:
                 await conn.execute("DELETE FROM notification_history WHERE created_at < $1", cutoff_date)
                 await conn.execute("DELETE FROM notification_states WHERE status = 'sent' AND updated_at < $1", cutoff_date)
