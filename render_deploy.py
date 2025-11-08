@@ -4,6 +4,8 @@ import asyncio
 import logging
 import time
 from aiohttp import web
+from main import memory_cleanup_task, heartbeat_manager
+
 
 # ✅ 导入所有需要的组件
 from main import (
@@ -91,17 +93,6 @@ async def initialize_services():
 
     await simple_on_startup()
     logger.info("✅ All services initialized with activity recovery")
-
-
-async def start_background_tasks():
-    """启动所有后台任务（不阻塞）"""
-    from main import memory_cleanup_task, heartbeat_manager
-
-    # ✅ 所有后台任务都应该使用 create_task()
-    asyncio.create_task(heartbeat_manager.start_heartbeat_loop())
-    asyncio.create_task(memory_cleanup_task())
-
-    logger.info("✅ All background tasks started")
 
 
 # ===========================
