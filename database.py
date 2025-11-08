@@ -903,6 +903,26 @@ class PostgreSQLDatabase:
             )
             return {row["time_segment"]: row["fine_amount"] for row in rows}
 
+    async def update_work_fine_rate(
+        self, checkin_type: str, time_segment: str, fine_amount: int
+    ):
+        """插入或更新上下班罚款规则"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO work_fine_configs (checkin_type, time_segment, fine_amount)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (checkin_type, time_segment)
+                DO UPDATE SET fine_amount = EXCLUDED.fine_amount
+                """,
+                checkin_type,
+                time_segment,
+                fine_amount,
+            )
+            logger.info(
+                f"✅ 已更新罚款配置: 类型={checkin_type}, 阈值={time_segment}, 金额={fine_amount}"
+            )
+
     async def update_work_fine_config(
         self, checkin_type: str, time_segment: str, fine_amount: int
     ):
@@ -921,6 +941,15 @@ class PostgreSQLDatabase:
                 time_segment,
                 fine_amount,
             )
+
+    async def clear_work_fine_rates(self, checkin_type: str):
+        """清空指定类型的上下班罚款配置"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM work_fine_configs WHERE checkin_type = $1",
+                checkin_type,
+            )
+            logger.info(f"🧹 已清空 {checkin_type} 的旧罚款配置")
 
     # ========== 推送设置操作 ==========
     async def get_push_settings(self) -> Dict:
@@ -1006,16 +1035,17 @@ class PostgreSQLDatabase:
                 async with self.pool.acquire() as conn:
                     # ✅ 增加超时保护（最多等待10秒）
                     rows = await asyncio.wait_for(
-                        conn.fetch("SELECT chat_id FROM groups"),
-                        timeout=10
+                        conn.fetch("SELECT chat_id FROM groups"), timeout=10
                     )
                     return [row["chat_id"] for row in rows]
 
-            except (asyncpg.InterfaceError,
-                    asyncpg.PostgresConnectionError,
-                    asyncio.TimeoutError) as e:
+            except (
+                asyncpg.InterfaceError,
+                asyncpg.PostgresConnectionError,
+                asyncio.TimeoutError,
+            ) as e:
                 logger.warning(f"⚠️ 第 {attempt} 次获取群组失败: {e}")
-                
+
                 # ✅ 主动关闭可能失效的连接
                 try:
                     await self.pool.close()
@@ -1306,9 +1336,9 @@ class PostgreSQLDatabase:
         try:
             cutoff_date = (datetime.now() - timedelta(days=days)).date()
             cutoff_date_str = str(cutoff_date)
-        
+
             logger.info(f"🔄 开始清理 {days} 天前的数据，截止日期: {cutoff_date_str}")
-        
+
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     # 清理用户活动记录
@@ -1316,22 +1346,23 @@ class PostgreSQLDatabase:
                         "DELETE FROM user_activities WHERE activity_date < $1",
                         cutoff_date_str,
                     )
-                
+
                     # 清理上下班记录
                     result2 = await conn.execute(
-                        "DELETE FROM work_records WHERE record_date < $1", 
-                        cutoff_date_str
+                        "DELETE FROM work_records WHERE record_date < $1",
+                        cutoff_date_str,
                     )
-                
+
                     # 清理用户数据（只清理last_updated早于截止日期的）
                     result3 = await conn.execute(
-                        "DELETE FROM users WHERE last_updated < $1", 
-                        cutoff_date_str
+                        "DELETE FROM users WHERE last_updated < $1", cutoff_date_str
                     )
-                
+
                 logger.info(f"✅ 已清理 {days} 天前的数据")
-                logger.debug(f"清理结果: user_activities={result1}, work_records={result2}, users={result3}")
-            
+                logger.debug(
+                    f"清理结果: user_activities={result1}, work_records={result2}, users={result3}"
+                )
+
         except Exception as e:
             logger.error(f"❌ 清理旧数据失败: {e}")
             # 重新抛出异常，让调用者处理
