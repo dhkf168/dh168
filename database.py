@@ -1044,19 +1044,15 @@ class PostgreSQLDatabase:
             ) as e:
                 logger.warning(f"⚠️ 第 {attempt} 次获取群组失败: {e}")
 
-                # ✅ 主动关闭可能失效的连接
-                try:
-                    await self.pool.close()
-                    logger.info("🔄 数据库连接池已重置")
-                except Exception as e2:
-                    logger.warning(f"重置连接池时出错: {e2}")
+                # ✅ 使用新的重连机制替换旧的连接池重置
+                reconnect_success = await self.reconnect()
 
-                if attempt < retries:
+                if reconnect_success and attempt < retries:
                     sleep_time = delay * attempt  # 指数退避
                     logger.info(f"⏳ {sleep_time:.1f}s 后重试（第 {attempt} 次）...")
                     await asyncio.sleep(sleep_time)
                 else:
-                    logger.error("❌ 重试次数耗尽，放弃操作。")
+                    logger.error("❌ 重试次数耗尽或重连失败，放弃操作。")
                     return []
 
             except Exception as e:
