@@ -84,6 +84,9 @@ async def initialize_services():
     await heartbeat_manager.initialize()
     logger.info("✅ Heartbeat initialized")
 
+    # 🆕 注入数据库连接池到通知恢复管理器
+    notification_recovery_manager.set_pool(db.pool)
+
     # 🆕 初始化通知恢复服务
     await notification_recovery_manager.initialize()
     logger.info("✅ Notification recovery initialized")
@@ -100,6 +103,7 @@ async def initialize_services():
     from main import simple_on_startup
     await simple_on_startup()
     logger.info("✅ All services initialized with activity recovery")
+
 
 
 # ===========================
