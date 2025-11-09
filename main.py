@@ -5066,22 +5066,6 @@ async def preload_frequent_data():
         logger.warning(f"⚠️ 预加载数据失败: {e}")
 
 
-async def polling_main():
-    """Polling模式主函数"""
-    await optimized_on_startup()
-
-    # 启动后台任务
-    background_tasks = [
-        asyncio.create_task(memory_cleanup_task()),
-        asyncio.create_task(health_monitoring_task()),
-        asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
-        asyncio.create_task(daily_reset_task()),
-        asyncio.create_task(auto_daily_export_task()),
-    ]
-
-    logger.info("🚀 使用 Polling 模式运行")
-    await dp.start_polling(bot, skip_updates=True)
-
 
 if __name__ == "__main__":
     try:
@@ -5091,4 +5075,5 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"💥 机器人异常退出: {e}")
         sys.exit(1)
+
 
