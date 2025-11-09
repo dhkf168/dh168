@@ -5005,15 +5005,16 @@ async def preload_frequent_data():
         logger.warning(f"⚠️ 预加载数据失败: {e}")
 
 
+# 注释由render_deploy.py启动，如果是其他服务器就使用这个
+# if __name__ == "__main__":
+#     try:
+#         asyncio.run(main())
+#     except KeyboardInterrupt:
+#         logger.info("👋 机器人已手动停止")
+#     except Exception as e:
+#         logger.error(f"💥 机器人异常退出: {e}")
+#         sys.exit(1)
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 机器人已手动停止")
-    except Exception as e:
-        logger.error(f"💥 机器人异常退出: {e}")
-        sys.exit(1)
 
 
 
