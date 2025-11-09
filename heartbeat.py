@@ -77,7 +77,7 @@ class HeartbeatManager:
     # 🔹 核心心跳逻辑
     # =====================================================
     async def ping_url(self, url: str) -> Dict[str, Any]:
-        """ping 一个URL"""
+        """ping 一个URL - 优化异常处理"""
         await self._create_session()
         start_time = time.time()
         try:
@@ -87,10 +87,46 @@ class HeartbeatManager:
                     "url": url,
                     "status": "success",
                     "status_code": response.status,
-                    "response_time": round(response_time * 1000, 2),  # 毫秒
+                    "response_time": round(response_time * 1000, 2),
                     "timestamp": datetime.now(beijing_tz),
                 }
+
+        except aiohttp.ClientPayloadError as e:
+            # ⚠️ 特殊情况：响应头过长或内容异常，不算关键失败
+            logger.info(f"⚠️ Ping {url} 返回异常但非关键: {e}")
+            return {
+                "url": url,
+                "status": "warning",
+                "error": str(e),
+                "response_time": -1,
+                "timestamp": datetime.now(beijing_tz),
+            }
+
+        except asyncio.TimeoutError:
+            # 超时算作失败
+            logger.warning(f"❌ Ping {url} 超时")
+            return {
+                "url": url,
+                "status": "failed",
+                "error": "timeout",
+                "response_time": -1,
+                "timestamp": datetime.now(beijing_tz),
+            }
+
+        except aiohttp.ClientConnectorError as e:
+            # DNS 或网络连接失败
+            logger.warning(f"❌ Ping {url} 连接失败: {e}")
+            return {
+                "url": url,
+                "status": "failed",
+                "error": f"connection_error: {e}",
+                "response_time": -1,
+                "timestamp": datetime.now(beijing_tz),
+            }
+
         except Exception as e:
+            # 其他未知错误
+            logger.warning(f"❌ Ping {url} 异常: {e}")
             return {
                 "url": url,
                 "status": "failed",
@@ -129,11 +165,11 @@ class HeartbeatManager:
             }
 
     async def perform_heartbeat(self):
-        """执行完整的心跳检查"""
+        """执行完整的心跳检查（优化日志与统计）"""
         if not self.enabled:
             return
 
-        # 自动恢复 session（Render reload 时可能丢失）
+        # 自动恢复 session
         if not self.session or self.session.closed:
             await self._create_session()
 
@@ -147,6 +183,8 @@ class HeartbeatManager:
 
             if result["status"] == "success":
                 logger.info(f"✅ Ping {url}: {result['response_time']}ms")
+            elif result["status"] == "warning":
+                logger.info(f"⚠️ Ping {url} 出现轻微异常: {result['error']}")
             else:
                 logger.warning(f"❌ Ping {url} 失败: {result['error']}")
                 self.failed_count += 1
@@ -165,8 +203,8 @@ class HeartbeatManager:
         self.last_heartbeat = datetime.now(beijing_tz)
         self.heartbeat_count += 1
 
-        # 记录统计
-        success_count = sum(1 for r in results if r["status"] == "success")
+        # 统计成功率（含warning视为成功）
+        success_count = sum(1 for r in results if r["status"] in ("success", "warning"))
         total_count = len(results)
         logger.info(f"📊 心跳完成: {success_count}/{total_count} 成功")
 
