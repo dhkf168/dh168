@@ -15,7 +15,6 @@ from main import (
     memory_cleanup_task,
     health_monitoring_task,
     daily_reset_task,
-    auto_daily_export_task,
     efficient_monthly_export_task,
     monthly_report_task,
     simple_on_startup,
@@ -150,7 +149,6 @@ async def start_background_tasks():
     asyncio.create_task(memory_cleanup_task())
     asyncio.create_task(health_monitoring_task())
     asyncio.create_task(daily_reset_task())
-    asyncio.create_task(auto_daily_export_task())
     asyncio.create_task(efficient_monthly_export_task())
     asyncio.create_task(monthly_report_task())
 
