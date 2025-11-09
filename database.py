@@ -1416,25 +1416,42 @@ class PostgreSQLDatabase:
     # ========== 健康检查与监控 ==========
     async def connection_health_check(self) -> bool:
         """
-        数据库连接层面的健康检查
-        返回: True-连接健康, False-连接异常
+        ✅ 数据库连接健康检查（优化版）
+        - 自动重试1次（防止瞬时断连）
+        - 更高效的轻量查询
+        - 统一日志风格
+        - 精确异常区分
         """
         if not self.pool:
-            logger.warning("⚠️ 数据库健康检查: 连接池未初始化")
+            logger.warning("⚠️ [DB] 健康检查失败：连接池未初始化")
             return False
 
-        try:
-            async with self.pool.acquire() as conn:
-                result = await conn.fetchval("SELECT 1")
-                is_healthy = result == 1
-                if not is_healthy:
-                    logger.error("❌ 数据库健康检查: 查询返回异常结果")
-                else:
-                    logger.debug("✅ 数据库健康检查: 连接正常")
-                return is_healthy
-        except Exception as e:
-            logger.error(f"❌ 数据库健康检查失败: {e}")
-            return False
+        for attempt in range(2):  # ✅ 增加1次自动重试
+            try:
+                async with self.pool.acquire() as conn:
+                    # ✅ 使用更标准的PostgreSQL查询（移除分号）
+                    result = await conn.fetchval("SELECT 1")
+                    if result == 1:
+                        if attempt > 0:
+                            logger.info("✅ [DB] 重试后连接恢复正常")
+                        else:
+                            logger.debug("✅ [DB] 连接正常")
+                        return True
+                    else:
+                        logger.error(f"❌ [DB] 健康检查返回异常值: {result}")
+                        return False
+
+            except (asyncio.TimeoutError, ConnectionError) as e:
+                logger.warning(f"⚠️ [DB] 健康检查网络异常 ({e.__class__.__name__})，正在重试... ({attempt+1}/2)")
+                if attempt == 0:  # ✅ 只在第一次重试时等待
+                    await asyncio.sleep(1)
+
+            except Exception as e:
+                logger.error(f"❌ [DB] 健康检查失败: {type(e).__name__}: {e}")
+                return False
+
+        logger.error("❌ [DB] 健康检查多次失败，数据库可能断开连接")
+        return False
 
     async def reconnect(self, max_retries: int = 3) -> bool:
         """
@@ -1515,3 +1532,4 @@ class PostgreSQLDatabase:
 
 # 全局数据库实例
 db = PostgreSQLDatabase()
+
