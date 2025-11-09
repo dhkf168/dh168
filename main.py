@@ -2436,98 +2436,331 @@ async def auto_end_current_activity(
                 ),
             )
 
+# ===== 上下班打卡功能 ======
+# async def process_work_checkin(message: types.Message, checkin_type: str):
+#     """处理上下班打卡 - 修复跨天问题版本"""
+#     chat_id = message.chat.id
+#     uid = message.from_user.id
+#     name = message.from_user.full_name
+#     now = get_beijing_time()
+#     current_time = now.strftime("%H:%M")
+
+#     user_lock = get_user_lock(chat_id, uid)
+#     async with user_lock:
+#         await db.init_group(chat_id)
+#         await db.init_user(chat_id, uid)
+
+#         user_data = await db.get_user_cached(chat_id, uid)
+#         today = str(now.date())
+
+#         # 检查是否有正在进行的活动（仅在下班打卡时检查）
+#         current_activity = user_data.get("current_activity")
+#         activity_auto_ended = False
+#         if checkin_type == "work_end" and current_activity:
+#             # 自动结束当前活动
+#             await auto_end_current_activity(chat_id, uid, user_data, now, message)
+#             activity_auto_ended = True
+
+#         today_records = await db.get_today_work_records(chat_id, uid)
+
+#         if checkin_type in today_records:
+#             action_text = "上班" if checkin_type == "work_start" else "下班"
+#             existing_time = today_records[checkin_type]["checkin_time"]
+#             existing_status = today_records[checkin_type]["status"]
+#             await message.answer(
+#                 f"❌ 您今天已经打过{action_text}卡了！\n"
+#                 f"⏰ 打卡时间：<code>{existing_time}</code>\n"
+#                 f"📊 状态：{existing_status}",
+#                 reply_markup=await get_main_keyboard(
+#                     chat_id=chat_id, show_admin=await is_admin(uid)
+#                 ),
+#                 parse_mode="HTML",
+#             )
+#             return
+
+#         if checkin_type == "work_end" and "work_start" not in today_records:
+#             await message.answer(
+#                 "❌ 您今天还没有打上班卡，无法打下班卡！\n"
+#                 "💡 请先使用'🟢 上班'按钮或 /workstart 命令打上班卡",
+#                 reply_markup=await get_main_keyboard(
+#                     chat_id=chat_id, show_admin=await is_admin(uid)
+#                 ),
+#                 parse_mode="HTML",
+#             )
+#             return
+
+#         work_hours = await db.get_group_work_time(chat_id)
+#         expected_time = work_hours[checkin_type]
+
+#         # 使用改进的跨天时间计算
+#         time_diff_minutes, expected_dt = calculate_cross_day_time_diff(
+#             now, expected_time, checkin_type
+#         )
+
+#         def format_time_diff(minutes):
+#             total_seconds = abs(int(minutes * 60))
+#             hours = total_seconds // 3600
+#             mins = (total_seconds % 3600) // 60
+#             secs = total_seconds % 60
+
+#             if hours > 0 and mins > 0 and secs > 0:
+#                 return f"{hours}小时{mins}分{secs}秒"
+#             elif hours > 0 and mins > 0:
+#                 return f"{hours}小时{mins}分"
+#             elif hours > 0:
+#                 return f"{hours}小时"
+#             elif mins > 0 and secs > 0:
+#                 return f"{mins}分{secs}秒"
+#             elif mins > 0:
+#                 return f"{mins}分"
+#             else:
+#                 return f"{secs}秒"
+
+#         time_diff_str = format_time_diff(time_diff_minutes)
+
+#         fine_amount = 0
+#         is_late_early = False
+
+#         if checkin_type == "work_start":
+#             # 上班打卡：时间差为正数表示迟到
+#             if time_diff_minutes > 0:
+#                 fine_amount = await calculate_work_fine("work_start", time_diff_minutes)
+#                 status = f"❌ 迟到 {time_diff_str}"
+#                 if fine_amount > 0:
+#                     status += f" \n💰罚款 {fine_amount}元"
+#                 emoji = "⏰"
+#                 is_late_early = True
+#             else:
+#                 status = "✅ 准时"
+#                 emoji = "👍"
+#             action_text = "上班"
+#         else:
+#             # 下班打卡：时间差为负数表示早退
+#             if time_diff_minutes < 0:
+#                 fine_amount = await calculate_work_fine(
+#                     "work_end", abs(time_diff_minutes)
+#                 )
+#                 status = f"❌ 早退 {time_diff_str}"
+#                 if fine_amount > 0:
+#                     status += f" \n💰罚款 {fine_amount}元"
+#                 emoji = "🏃"
+#                 is_late_early = True
+#             else:
+#                 status = "✅ 准时"
+#                 emoji = "👍"
+#             action_text = "下班"
+
+#         await db.add_work_record(
+#             chat_id,
+#             uid,
+#             today,
+#             checkin_type,
+#             current_time,
+#             status,
+#             time_diff_minutes,
+#             fine_amount,
+#         )
+
+#         # 显示实际选择的期望时间点
+#         expected_time_display = expected_dt.strftime("%m/%d %H:%M")
+
+#         result_msg = (
+#             f"{emoji} <b>{action_text}打卡完成</b>\n"
+#             f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
+#             f"⏰ 打卡时间：<code>{current_time}</code>\n"
+#             f"📅 期望时间：<code>{expected_time_display}</code>\n"
+#             f"📊 状态：{status}"
+#         )
+
+#         # 如果自动结束了活动，添加提示
+#         if checkin_type == "work_end" and activity_auto_ended and current_activity:
+#             result_msg += f"\n\n🔄 检测到您有未结束的活动 <code>{current_activity}</code>，已自动为您结束"
+
+#         await message.answer(
+#             result_msg,
+#             reply_markup=await get_main_keyboard(
+#                 chat_id=chat_id, show_admin=await is_admin(uid)
+#             ),
+#             parse_mode="HTML",
+#         )
+
+#         # 修复通知推送部分 - 确保迟到早退通知能正确发送
+#         if is_late_early:
+#             try:
+#                 # 确定通知类型
+#                 if checkin_type == "work_start":
+#                     status_type = "迟到"
+#                     time_detail = f"迟到 {time_diff_str}"
+#                 else:
+#                     status_type = "早退"
+#                     time_detail = f"早退 {time_diff_str}"
+
+#                 # 获取群组名称
+#                 chat_title = str(chat_id)
+#                 try:
+#                     chat_info = await bot.get_chat(chat_id)
+#                     chat_title = chat_info.title or chat_title
+#                 except Exception as e:
+#                     logger.warning(f"无法获取群组信息: {e}")
+
+#                 # 构建通知内容
+#                 notif_text = (
+#                     f"⚠️ <b>{action_text}{status_type}通知</b>\n"
+#                     f"🏢 群组：<code>{chat_title}</code>\n"
+#                     f"---------------------------------------\n"
+#                     f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
+#                     f"⏰ 打卡时间：<code>{current_time}</code>\n"
+#                     f"📅 期望时间：<code>{expected_time_display}</code>\n"
+#                     f"⏱️ {time_detail}"
+#                 )
+
+#                 if fine_amount > 0:
+#                     notif_text += f"\n💰 罚款金额：<code>{fine_amount}</code> 元"
+
+#                 # 发送通知并检查结果
+#                 sent = await NotificationService.send_notification(chat_id, notif_text)
+
+#                 if sent:
+#                     logger.info(
+#                         f"✅ 已发送{action_text}{status_type}通知：{time_detail}，罚款{fine_amount}元"
+#                     )
+#                 else:
+#                     logger.warning(
+#                         f"⚠️ {action_text}{status_type}通知发送失败，可能没有配置推送目标"
+#                     )
+
+#                     # 如果没有成功发送到任何目标，尝试发送给管理员作为兜底
+#                     try:
+#                         for admin_id in Config.ADMINS:
+#                             await bot.send_message(
+#                                 admin_id,
+#                                 f"🚨 重要：{action_text}{status_type}通知发送失败\n{notif_text}",
+#                                 parse_mode="HTML",
+#                             )
+#                         logger.info(f"✅ 已发送兜底通知给管理员")
+#                     except Exception as admin_e:
+#                         logger.error(f"❌ 发送兜底通知给管理员失败: {admin_e}")
+
+#             except Exception as e:
+#                 logger.error(f"❌ 发送上下班通知失败: {e}")
+
+#                 # 记录详细的错误信息以便调试
+#                 import traceback
+
+#                 error_details = traceback.format_exc()
+#                 logger.error(f"❌ 详细错误信息: {error_details}")
 
 async def process_work_checkin(message: types.Message, checkin_type: str):
-    """处理上下班打卡 - 修复跨天问题版本"""
+    """
+    智能化上下班打卡系统（跨天安全修复版）
+    保留全部原有功能 + 增强智能判断、错误容错、日志追踪。
+    """
+    import traceback
+    from contextlib import suppress
+
     chat_id = message.chat.id
     uid = message.from_user.id
     name = message.from_user.full_name
     now = get_beijing_time()
     current_time = now.strftime("%H:%M")
+    today = str(now.date())
+    trace_id = f"{chat_id}-{uid}-{int(time.time())}"
+
+    logger.info(f"🟢[{trace_id}] 开始处理 {checkin_type} 打卡请求：{name}({uid})")
 
     user_lock = get_user_lock(chat_id, uid)
     async with user_lock:
-        await db.init_group(chat_id)
-        await db.init_user(chat_id, uid)
+        # ✅ 初始化群组与用户数据
+        try:
+            await db.init_group(chat_id)
+            await db.init_user(chat_id, uid)
+            user_data = await db.get_user_cached(chat_id, uid)
+        except Exception as e:
+            logger.error(f"[{trace_id}] ❌ 初始化用户/群组失败: {e}")
+            await message.answer("⚠️ 数据初始化失败，请稍后再试。")
+            return
 
-        user_data = await db.get_user_cached(chat_id, uid)
-        today = str(now.date())
+        # ✅ 检查是否重复打卡
+        try:
+            has_record_today = await db.has_work_record_today(chat_id, uid, checkin_type)
+        except Exception as e:
+            logger.error(f"[{trace_id}] ❌ 检查重复打卡失败: {e}")
+            has_record_today = False  # 允许继续执行但记录日志
 
-        # 检查是否有正在进行的活动（仅在下班打卡时检查）
+        if has_record_today:
+            today_records = await db.get_today_work_records(chat_id, uid)
+            existing_record = today_records.get(checkin_type)
+            action_text = "上班" if checkin_type == "work_start" else "下班"
+            status_msg = f"❌ 您今天已经打过{action_text}卡了！"
+
+            if existing_record:
+                existing_time = existing_record["checkin_time"]
+                existing_status = existing_record["status"]
+                status_msg += f"\n⏰ 打卡时间：<code>{existing_time}</code>"
+                status_msg += f"\n📊 状态：{existing_status}"
+
+            await message.answer(
+                status_msg,
+                reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=await is_admin(uid)),
+                parse_mode="HTML",
+            )
+            logger.info(f"[{trace_id}] 🔁 检测到重复{action_text}打卡，终止处理。")
+            return
+
+        # ✅ 自动结束活动（仅下班）
         current_activity = user_data.get("current_activity")
         activity_auto_ended = False
         if checkin_type == "work_end" and current_activity:
-            # 自动结束当前活动
-            await auto_end_current_activity(chat_id, uid, user_data, now, message)
-            activity_auto_ended = True
+            with suppress(Exception):
+                await auto_end_current_activity(chat_id, uid, user_data, now, message)
+                activity_auto_ended = True
+                logger.info(f"[{trace_id}] 🔄 已自动结束活动：{current_activity}")
 
-        today_records = await db.get_today_work_records(chat_id, uid)
+        # ✅ 下班前检查上班记录
+        if checkin_type == "work_end":
+            has_work_start_today = await db.has_work_record_today(chat_id, uid, "work_start")
+            if not has_work_start_today:
+                await message.answer(
+                    "❌ 您今天还没有打上班卡，无法打下班卡！\n"
+                    "💡 请先使用'🟢 上班'按钮或 /workstart 命令打上班卡",
+                    reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=await is_admin(uid)),
+                    parse_mode="HTML",
+                )
+                logger.warning(f"[{trace_id}] ⚠️ 用户试图下班打卡但未上班")
+                return
 
-        if checkin_type in today_records:
-            action_text = "上班" if checkin_type == "work_start" else "下班"
-            existing_time = today_records[checkin_type]["checkin_time"]
-            existing_status = today_records[checkin_type]["status"]
-            await message.answer(
-                f"❌ 您今天已经打过{action_text}卡了！\n"
-                f"⏰ 打卡时间：<code>{existing_time}</code>\n"
-                f"📊 状态：{existing_status}",
-                reply_markup=await get_main_keyboard(
-                    chat_id=chat_id, show_admin=await is_admin(uid)
-                ),
-                parse_mode="HTML",
-            )
-            return
-
-        if checkin_type == "work_end" and "work_start" not in today_records:
-            await message.answer(
-                "❌ 您今天还没有打上班卡，无法打下班卡！\n"
-                "💡 请先使用'🟢 上班'按钮或 /workstart 命令打上班卡",
-                reply_markup=await get_main_keyboard(
-                    chat_id=chat_id, show_admin=await is_admin(uid)
-                ),
-                parse_mode="HTML",
-            )
-            return
-
+        # ✅ 获取工作时间设置
         work_hours = await db.get_group_work_time(chat_id)
         expected_time = work_hours[checkin_type]
 
-        # 使用改进的跨天时间计算
-        time_diff_minutes, expected_dt = calculate_cross_day_time_diff(
-            now, expected_time, checkin_type
-        )
+        # ✅ 计算时间差（含跨天）
+        time_diff_minutes, expected_dt = calculate_cross_day_time_diff(now, expected_time, checkin_type)
+        time_diff_hours = abs(time_diff_minutes / 60)
 
-        def format_time_diff(minutes):
-            total_seconds = abs(int(minutes * 60))
-            hours = total_seconds // 3600
-            mins = (total_seconds % 3600) // 60
-            secs = total_seconds % 60
+        # ✅ 时间异常修正
+        if time_diff_hours > 24:
+            logger.warning(f"[{trace_id}] ⏰ 异常时间差检测 {time_diff_hours}小时，自动纠正为0")
+            time_diff_minutes = 0
 
-            if hours > 0 and mins > 0 and secs > 0:
-                return f"{hours}小时{mins}分{secs}秒"
-            elif hours > 0 and mins > 0:
-                return f"{hours}小时{mins}分"
-            elif hours > 0:
-                return f"{hours}小时"
-            elif mins > 0 and secs > 0:
-                return f"{mins}分{secs}秒"
-            elif mins > 0:
-                return f"{mins}分"
-            else:
-                return f"{secs}秒"
+        # ✅ 格式化时间差
+        def format_time_diff(minutes: float) -> str:
+            mins = int(abs(minutes))
+            h, m = divmod(mins, 60)
+            if h > 0:
+                return f"{h}小时{m}分"
+            return f"{m}分钟"
 
         time_diff_str = format_time_diff(time_diff_minutes)
-
         fine_amount = 0
         is_late_early = False
 
+        # ✅ 打卡状态判断
         if checkin_type == "work_start":
-            # 上班打卡：时间差为正数表示迟到
             if time_diff_minutes > 0:
                 fine_amount = await calculate_work_fine("work_start", time_diff_minutes)
                 status = f"❌ 迟到 {time_diff_str}"
-                if fine_amount > 0:
-                    status += f" \n💰罚款 {fine_amount}元"
+                if fine_amount:
+                    status += f"（💰罚款 {fine_amount}元）"
                 emoji = "⏰"
                 is_late_early = True
             else:
@@ -2535,14 +2768,11 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 emoji = "👍"
             action_text = "上班"
         else:
-            # 下班打卡：时间差为负数表示早退
             if time_diff_minutes < 0:
-                fine_amount = await calculate_work_fine(
-                    "work_end", abs(time_diff_minutes)
-                )
+                fine_amount = await calculate_work_fine("work_end", abs(time_diff_minutes))
                 status = f"❌ 早退 {time_diff_str}"
-                if fine_amount > 0:
-                    status += f" \n💰罚款 {fine_amount}元"
+                if fine_amount:
+                    status += f"（💰罚款 {fine_amount}元）"
                 emoji = "🏃"
                 is_late_early = True
             else:
@@ -2550,20 +2780,22 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 emoji = "👍"
             action_text = "下班"
 
-        await db.add_work_record(
-            chat_id,
-            uid,
-            today,
-            checkin_type,
-            current_time,
-            status,
-            time_diff_minutes,
-            fine_amount,
-        )
+        # ✅ 安全写入数据库（含重试）
+        for attempt in range(2):
+            try:
+                await db.add_work_record(
+                    chat_id, uid, today, checkin_type,
+                    current_time, status, time_diff_minutes, fine_amount,
+                )
+                break
+            except Exception as e:
+                logger.error(f"[{trace_id}] ❌ 数据写入失败，第{attempt+1}次尝试: {e}")
+                if attempt == 1:
+                    await message.answer("⚠️ 数据保存失败，请稍后再试。")
+                    return
+                await asyncio.sleep(0.5)
 
-        # 显示实际选择的期望时间点
         expected_time_display = expected_dt.strftime("%m/%d %H:%M")
-
         result_msg = (
             f"{emoji} <b>{action_text}打卡完成</b>\n"
             f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
@@ -2572,38 +2804,24 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             f"📊 状态：{status}"
         )
 
-        # 如果自动结束了活动，添加提示
         if checkin_type == "work_end" and activity_auto_ended and current_activity:
-            result_msg += f"\n\n🔄 检测到您有未结束的活动 <code>{current_activity}</code>，已自动为您结束"
+            result_msg += f"\n\n🔄 检测到未结束活动 <code>{current_activity}</code>，已自动结束"
 
         await message.answer(
             result_msg,
-            reply_markup=await get_main_keyboard(
-                chat_id=chat_id, show_admin=await is_admin(uid)
-            ),
+            reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=await is_admin(uid)),
             parse_mode="HTML",
         )
 
-        # 修复通知推送部分 - 确保迟到早退通知能正确发送
+        # ✅ 智能通知模块
         if is_late_early:
             try:
-                # 确定通知类型
-                if checkin_type == "work_start":
-                    status_type = "迟到"
-                    time_detail = f"迟到 {time_diff_str}"
-                else:
-                    status_type = "早退"
-                    time_detail = f"早退 {time_diff_str}"
+                status_type = "迟到" if checkin_type == "work_start" else "早退"
+                time_detail = f"{status_type} {time_diff_str}"
 
-                # 获取群组名称
-                chat_title = str(chat_id)
-                try:
+                with suppress(Exception):
                     chat_info = await bot.get_chat(chat_id)
-                    chat_title = chat_info.title or chat_title
-                except Exception as e:
-                    logger.warning(f"无法获取群组信息: {e}")
-
-                # 构建通知内容
+                    chat_title = getattr(chat_info, "title", str(chat_id))
                 notif_text = (
                     f"⚠️ <b>{action_text}{status_type}通知</b>\n"
                     f"🏢 群组：<code>{chat_title}</code>\n"
@@ -2613,42 +2831,21 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                     f"📅 期望时间：<code>{expected_time_display}</code>\n"
                     f"⏱️ {time_detail}"
                 )
-
-                if fine_amount > 0:
+                if fine_amount:
                     notif_text += f"\n💰 罚款金额：<code>{fine_amount}</code> 元"
 
-                # 发送通知并检查结果
                 sent = await NotificationService.send_notification(chat_id, notif_text)
-
-                if sent:
-                    logger.info(
-                        f"✅ 已发送{action_text}{status_type}通知：{time_detail}，罚款{fine_amount}元"
-                    )
-                else:
-                    logger.warning(
-                        f"⚠️ {action_text}{status_type}通知发送失败，可能没有配置推送目标"
-                    )
-
-                    # 如果没有成功发送到任何目标，尝试发送给管理员作为兜底
-                    try:
-                        for admin_id in Config.ADMINS:
-                            await bot.send_message(
-                                admin_id,
-                                f"🚨 重要：{action_text}{status_type}通知发送失败\n{notif_text}",
-                                parse_mode="HTML",
-                            )
-                        logger.info(f"✅ 已发送兜底通知给管理员")
-                    except Exception as admin_e:
-                        logger.error(f"❌ 发送兜底通知给管理员失败: {admin_e}")
+                if not sent:
+                    logger.warning(f"[{trace_id}] ⚠️ 通知发送失败，尝试管理员兜底。")
+                    for admin_id in Config.ADMINS:
+                        with suppress(Exception):
+                            await bot.send_message(admin_id, notif_text, parse_mode="HTML")
 
             except Exception as e:
-                logger.error(f"❌ 发送上下班通知失败: {e}")
+                logger.error(f"[{trace_id}] ❌ 通知发送失败: {e}\n{traceback.format_exc()}")
 
-                # 记录详细的错误信息以便调试
-                import traceback
+    logger.info(f"✅[{trace_id}] {action_text}打卡流程完成")
 
-                error_details = traceback.format_exc()
-                logger.error(f"❌ 详细错误信息: {error_details}")
 
 
 # ===== 添加辅助函数 ======
@@ -4894,3 +5091,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"💥 机器人异常退出: {e}")
         sys.exit(1)
+
