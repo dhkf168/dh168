@@ -1301,7 +1301,7 @@ async def cmd_unbind_group(message: types.Message):
 @admin_required
 @rate_limit(rate=3, per=30)
 async def cmd_addactivity(message: types.Message):
-    """添加新活动 - 优化版本"""
+    """添加新活动 - 修复缓存版本"""
     args = message.text.split()
     if len(args) != 4:
         await message.answer(
@@ -1316,6 +1316,9 @@ async def cmd_addactivity(message: types.Message):
         act, max_times, time_limit = args[1], int(args[2]), int(args[3])
         existed = await db.activity_exists(act)
         await db.update_activity_config(act, max_times, time_limit)
+
+        # 🆕 关键修复：强制刷新活动配置缓存
+        await db.force_refresh_activity_cache()
 
         if existed:
             await message.answer(
