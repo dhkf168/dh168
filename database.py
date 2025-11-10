@@ -307,8 +307,7 @@ class PostgreSQLDatabase:
         if expired_keys:
             logger.debug(f"清理了 {len(expired_keys)} 个过期缓存")
 
-    # 在 PostgreSQLDatabase 类中添加以下方法：
-
+    # 🆕 新增：强制刷新活动配置缓存
     async def force_refresh_activity_cache(self):
         """强制刷新活动配置缓存"""
         # 清理活动相关的所有缓存
@@ -324,7 +323,8 @@ class PostgreSQLDatabase:
 
         logger.info("🔄 活动配置缓存已强制刷新")
 
-    # ========== 群组相关操作 ==========
+        # ========== 群组相关操作 ==========
+
     async def init_group(self, chat_id: int):
         """初始化群组"""
         async with self.pool.acquire() as conn:
