@@ -22,6 +22,88 @@ from main import (
 
 from config import Config
 
+
+# ===========================
+# 🆕 实例运行检查函数
+# ===========================
+async def is_another_instance_running() -> bool:
+    """检查是否有其他实例在运行"""
+    try:
+        # 方法1: 检查特定端口是否被占用（Render 使用动态端口）
+        import socket
+
+        port = int(os.environ.get("PORT", 8080))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)  # 1秒超时
+        result = sock.connect_ex(("localhost", port))
+        sock.close()
+        if result == 0:
+            logger.warning(f"⚠️ 检测到端口 {port} 已被占用，可能已有实例在运行")
+            return True
+    except Exception as e:
+        logger.warning(f"⚠️ 端口检查失败: {e}")
+
+    # 方法2: 检查进程（在Render环境中可能不可用，但保留作为备选）
+    try:
+        import psutil
+
+        current_pid = os.getpid()
+
+        # 查找包含机器人相关关键词的进程
+        bot_keywords = ["bot", "telegram", "render_deploy.py", "main.py", "python"]
+
+        bot_process_count = 0
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info["pid"] == current_pid:
+                    continue
+
+                cmdline = proc.info["cmdline"]
+                if cmdline:
+                    cmd_str = " ".join(cmdline).lower()
+                    # 检查是否包含机器人相关关键词且不是系统进程
+                    if (
+                        any(keyword in cmd_str for keyword in bot_keywords)
+                        and "render_deploy.py" in cmd_str
+                    ):
+                        bot_process_count += 1
+                        logger.warning(
+                            f"⚠️ 检测到疑似机器人进程: PID {proc.info['pid']}"
+                        )
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+                continue
+
+        if bot_process_count > 0:
+            logger.warning(f"⚠️ 检测到 {bot_process_count} 个疑似机器人进程")
+            return True
+
+    except ImportError:
+        logger.info("📝 psutil 不可用，跳过进程检查")
+    except Exception as e:
+        logger.warning(f"⚠️ 进程检查失败: {e}")
+
+    # 方法3: 检查文件锁（适用于大多数环境）
+    try:
+        lock_file = "bot_instance.lock"
+        if os.path.exists(lock_file):
+            # 检查锁文件是否过期（比如超过5分钟）
+            file_age = time.time() - os.path.getmtime(lock_file)
+            if file_age < 300:  # 5分钟内创建的锁文件认为有效
+                logger.warning("⚠️ 检测到锁文件，可能已有实例在运行")
+                return True
+            else:
+                logger.info("🗑️ 发现过期的锁文件，清理后继续")
+                os.remove(lock_file)
+
+        # 创建新的锁文件
+        with open(lock_file, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception as e:
+        logger.warning(f"⚠️ 文件锁检查失败: {e}")
+
+    return False
+
+
 # ===========================
 # 日志配置
 # ===========================
@@ -142,17 +224,35 @@ async def initialize_services():
 # 启动后台任务（不会阻塞主线程）
 # ===========================
 async def start_background_tasks():
-    """启动所有后台任务（不阻塞）"""
+    """启动所有后台任务（不阻塞）- Render专用保护"""
 
-    # ✅ 所有后台任务都应该使用 create_task()
-    asyncio.create_task(heartbeat_manager.start_heartbeat_loop())
-    asyncio.create_task(memory_cleanup_task())
-    asyncio.create_task(health_monitoring_task())
-    asyncio.create_task(daily_reset_task())
-    asyncio.create_task(efficient_monthly_export_task())
-    asyncio.create_task(monthly_report_task())
+    # 🆕 防止在Render环境中重复启动
+    if hasattr(start_background_tasks, "_executed"):
+        logger.warning("⚠️ [Render保护] 后台任务已经启动，跳过重复启动")
+        return
 
-    logger.info("✅ All background tasks started")
+    # 🆕 标记为已执行
+    start_background_tasks._executed = True
+
+    logger.info("🚀 [Render] 启动所有后台任务...")
+
+    try:
+        # 启动所有后台任务
+        asyncio.create_task(heartbeat_manager.start_heartbeat_loop())
+        asyncio.create_task(memory_cleanup_task())
+        asyncio.create_task(health_monitoring_task())
+        asyncio.create_task(daily_reset_task())
+        asyncio.create_task(efficient_monthly_export_task())
+        asyncio.create_task(monthly_report_task())
+
+        logger.info("✅ [Render] 所有后台任务已启动")
+
+    except Exception as e:
+        logger.error(f"❌ [Render] 启动后台任务失败: {e}")
+        # 如果启动失败，清除标记以便重试
+        if hasattr(start_background_tasks, "_executed"):
+            delattr(start_background_tasks, "_executed")
+        raise
 
 
 # ===========================
@@ -193,6 +293,12 @@ async def safe_start_polling():
 # 主程序入口
 # ===========================
 async def main():
+    """Render部署的主函数 - 添加实例检查"""
+    # 🆕 实例运行检查
+    if await is_another_instance_running():
+        logger.error("❌ 检测到另一个机器人实例正在运行，当前实例退出")
+        return
+
     web_runner = None
     web_site = None
 
