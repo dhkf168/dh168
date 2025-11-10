@@ -307,6 +307,23 @@ class PostgreSQLDatabase:
         if expired_keys:
             logger.debug(f"清理了 {len(expired_keys)} 个过期缓存")
 
+    # 在 PostgreSQLDatabase 类中添加以下方法：
+
+    async def force_refresh_activity_cache(self):
+        """强制刷新活动配置缓存"""
+        # 清理活动相关的所有缓存
+        cache_keys_to_remove = ["activity_limits", "push_settings", "fine_rates"]
+
+        for key in cache_keys_to_remove:
+            self._cache.pop(key, None)
+            self._cache_ttl.pop(key, None)
+
+        # 重新加载活动配置
+        await self.get_activity_limits()
+        await self.get_fine_rates()
+
+        logger.info("🔄 活动配置缓存已强制刷新")
+
     # ========== 群组相关操作 ==========
     async def init_group(self, chat_id: int):
         """初始化群组"""
@@ -804,9 +821,19 @@ class PostgreSQLDatabase:
         return limits.get(activity, {}).get("max_times", 0)
 
     async def activity_exists(self, activity: str) -> bool:
-        """检查活动是否存在"""
-        limits = await self.get_activity_limits()
-        return activity in limits
+        """检查活动是否存在 - 修复版本"""
+        # 先检查缓存
+        cache_key = "activity_limits"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return activity in cached
+
+        # 如果缓存不存在，直接从数据库查询
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM activity_configs WHERE activity_name = $1", activity
+            )
+            return row is not None
 
     async def update_activity_config(
         self, activity: str, max_times: int, time_limit: int
