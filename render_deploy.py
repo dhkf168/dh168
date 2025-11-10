@@ -194,8 +194,13 @@ async def start_web_server():
 # ===========================
 # 初始化所有关键服务（数据库 / 心跳 / 配置）
 # ===========================
+# 在 render_deploy.py 的 initialize_services 函数中添加
 async def initialize_services():
     logger.info("🔄 Initializing services...")
+
+    # 🆕 强制设置Polling模式
+    Config.BOT_MODE = "polling"
+    logger.info("✅ 强制设置为 Polling 模式")
 
     # ✅ 初始化数据库
     await db.initialize()
@@ -212,6 +217,13 @@ async def initialize_services():
 
         # 额外等待确保 webhook 完全删除
         await asyncio.sleep(2)
+
+        # 🆕 双重确认
+        webhook_info = await bot.get_webhook_info()
+        if webhook_info.url:
+            logger.warning(f"⚠️ Webhook 仍然存在: {webhook_info.url}")
+            await bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(1)
     except Exception as e:
         logger.warning(f"⚠️ 删除 webhook 时出现警告: {e}")
 
