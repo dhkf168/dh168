@@ -2186,6 +2186,41 @@ async def cmd_showpush(message: types.Message):
     )
 
 
+@dp.message(Command("reset_status"))
+@admin_required
+async def cmd_reset_status(message: types.Message):
+    """检查重置状态和设置"""
+    chat_id = message.chat.id
+
+    try:
+        group_data = await db.get_group_cached(chat_id)
+        reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
+        reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+        now = get_beijing_time()
+        reset_time_today = now.replace(hour=reset_hour, minute=reset_minute, second=0)
+
+        status_info = (
+            f"🔄 重置状态检查\n\n"
+            f"📅 当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"⏰ 重置时间: {reset_hour:02d}:{reset_minute:02d}\n"
+            f"📊 下次重置: {reset_time_today.strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"🔧 重置内容:\n"
+            f"• 每日活动次数和时间 ✅\n"
+            f"• 上下班打卡记录 ✅\n"
+            f"• 当前进行中的活动 ✅\n\n"
+            f"📤 导出设置:\n"
+            f"• 重置前1分钟自动导出 ✅\n"
+            f"• 重置后30分钟导出昨日数据 ✅\n"
+            f"• 推送到绑定频道/群组 ✅"
+        )
+
+        await message.answer(status_info)
+
+    except Exception as e:
+        await message.answer(f"❌ 检查重置状态失败: {e}")
+
+
 @dp.message(Command("testpush"))
 @admin_required
 @rate_limit(rate=3, per=60)
