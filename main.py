@@ -3111,18 +3111,6 @@ async def handle_back_command(message: types.Message):
     """处理回座命令 - 优化版本"""
     await process_back(message)
 
-@dp.message(lambda message: message.text and message.text.strip() in ["🔙 返回主菜单"])
-@rate_limit(rate=5, per=60)
-async def handle_back_to_main_menu(message: types.Message):
-    """处理返回主菜单按钮 - 优化版本"""
-    uid = message.from_user.id
-    await message.answer(
-        "已返回主菜单",
-        reply_markup=await get_main_keyboard(
-            chat_id=message.chat.id, show_admin=await is_admin(uid)
-        ),
-    )
-
 
 @dp.message(lambda message: message.text and message.text.strip() in ["📊 我的记录"])
 @rate_limit(rate=10, per=60)
@@ -3148,8 +3136,6 @@ async def handle_rank(message: types.Message):
     user_lock = get_user_lock(chat_id, uid)
     async with user_lock:
         await show_rank(message)
-
-
 
 
 @dp.message(lambda message: message.text and message.text.strip() in ["👑 管理员面板"])
@@ -3254,7 +3240,17 @@ async def handle_dynamic_activity_buttons(message: types.Message):
     )
 
 
-
+@dp.message(lambda message: message.text and message.text.strip() in ["🔙 返回主菜单"])
+@rate_limit(rate=5, per=60)
+async def handle_back_to_main_menu(message: types.Message):
+    """处理返回主菜单按钮 - 优化版本"""
+    uid = message.from_user.id
+    await message.answer(
+        "已返回主菜单",
+        reply_markup=await get_main_keyboard(
+            chat_id=message.chat.id, show_admin=await is_admin(uid)
+        ),
+    )
 
 
 @dp.message(lambda message: message.text and message.text.strip() in ["📤 导出数据"])
@@ -3767,60 +3763,62 @@ async def export_data(message: types.Message):
 
 # ==================== CSV导出推送功能优化 ====================
 async def optimized_monthly_export(chat_id: int, year: int, month: int):
-    """优化版月度数据导出，减少内存占用"""
+    """优化版月度数据导出，每个用户一行，活动横向排列"""
     try:
-        # 分批处理数据，避免一次性加载所有数据
-        batch_size = 50
-        offset = 0
+        # 获取活动配置
+        activity_limits = await db.get_activity_limits_cached()
+        activity_names = list(activity_limits.keys())
 
         csv_buffer = StringIO()
         writer = csv.writer(csv_buffer)
 
-        # 写入表头
-        headers = [
-            "用户ID",
-            "用户昵称",
-            "活动名称",
-            "活动次数",
-            "总时长(秒)",
-            "总时长",
-        ]
+        # 构建表头
+        headers = ["用户ID", "用户昵称"]
+
+        # 为每个活动添加次数和时长的列
+        for act in activity_names:
+            headers.extend([f"{act}次数", f"{act}总时长"])
+
+        # 添加总计列
+        headers.extend(
+            ["活动次数总计", "活动用时总计", "罚款总金额", "超时次数", "总超时时间"]
+        )
+
         writer.writerow(headers)
 
-        has_data = False
+        # 使用现有的月度统计方法
+        monthly_stats = await db.get_monthly_statistics(chat_id, year, month)
 
-        while True:
-            # 分批查询数据
-            monthly_stats = await db.get_monthly_statistics_batch(
-                chat_id, year, month, batch_size, offset
+        if not monthly_stats:
+            return None
+
+        # 处理每个用户的数据
+        for user_stat in monthly_stats:
+            row = [user_stat["user_id"], user_stat.get("nickname", "未知用户")]
+
+            # 添加每个活动的次数和时长
+            for act in activity_names:
+                activity_info = user_stat["activities"].get(act, {})
+                count = activity_info.get("count", 0)
+                time_seconds = activity_info.get("time", 0)
+                # 使用数据库的格式化方法
+                time_formatted = db.format_time_for_csv(time_seconds)
+
+                row.append(count)
+                row.append(time_formatted)
+
+            # 添加总计信息 - 使用正确的字段名
+            row.extend(
+                [
+                    user_stat.get("total_count", 0),
+                    db.format_time_for_csv(user_stat.get("total_time", 0)),
+                    user_stat.get("total_fines", 0),
+                    user_stat.get("total_overtime_count", 0),
+                    db.format_time_for_csv(user_stat.get("total_overtime_time", 0)),
+                ]
             )
 
-            if not monthly_stats:
-                break
-
-            for user_stat in monthly_stats:
-                has_data = True
-                user_activities = user_stat.get("activities", {})
-
-                for activity_name, activity_info in user_activities.items():
-                    row = [
-                        user_stat["user_id"],
-                        user_stat.get("nickname", "未知用户"),
-                        activity_name,
-                        activity_info.get("count", 0),
-                        activity_info.get("time", 0),
-                        activity_info.get("time_formatted", "0小时0分钟"),
-                    ]
-                    writer.writerow(row)
-
-            offset += batch_size
-
-            # 释放内存
-            del monthly_stats
-            await asyncio.sleep(0.1)  # 短暂让出控制权
-
-        if not has_data:
-            return None
+            writer.writerow(row)
 
         return csv_buffer.getvalue()
 
