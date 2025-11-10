@@ -1234,11 +1234,11 @@ class PostgreSQLDatabase:
         self, chat_id: int, year: int, month: int, limit: int, offset: int
     ) -> List[Dict]:
         """分批获取月度统计信息 - 修复日期格式"""
-        start_date = f"{year:04d}-{month:02d}-01"
+        start_date = date(year, month, 1)
         if month == 12:
-            end_date = f"{year+1:04d}-01-01"
+            end_date = date(year + 1, 1, 1)
         else:
-            end_date = f"{year:04d}-{month+1:02d}-01"
+            end_date = date(year, month + 1, 1)
 
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
