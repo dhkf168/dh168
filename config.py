@@ -9,11 +9,11 @@ beijing_tz = timezone(timedelta(hours=8))
 
 class Config:
     # Bot 配置
-    TOKEN = os.getenv("BOT_TOKEN", "")
+    TOKEN = os.getenv("BOT_TOKEN", "8301902909:AAG9FVqGgvntWNYNgbIrYROXrfFMlM0PRkA")
 
     # 数据库配置
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", ""
+        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
     )
 
     # 性能优化配置
@@ -33,16 +33,25 @@ class Config:
     BOT_MODE = os.getenv("BOT_MODE", "auto")  # auto, webhook, polling
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Webhook完整URL
 
+    # 修改 should_use_webhook 方法
     @classmethod
     def should_use_webhook(cls):
-        """判断是否应该使用Webhook模式"""
-        if cls.BOT_MODE == "webhook":
+        """判断是否应该使用Webhook模式 - 修复版本"""
+        mode = cls.BOT_MODE.lower()
+
+        if mode == "webhook":
+            if not cls.WEBHOOK_URL:
+                print("⚠️ 警告: Webhook模式已启用但WEBHOOK_URL未设置")
             return True
-        elif cls.BOT_MODE == "polling":
+        elif mode == "polling":
             return False
         else:  # auto模式
-            # 自动检测：有WEBHOOK_URL且不在开发环境就使用Webhook
-            return bool(cls.WEBHOOK_URL) and not cls.is_development()
+            # 在Render等云平台默认使用Polling，除非明确配置Webhook
+            if cls.is_development():
+                return bool(cls.WEBHOOK_URL)
+            else:
+                # 生产环境：只有明确配置了WEBHOOK_URL才使用Webhook
+                return bool(cls.WEBHOOK_URL) and cls.WEBHOOK_URL.strip()
 
     @classmethod
     def is_development(cls):
@@ -377,4 +386,3 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
-
