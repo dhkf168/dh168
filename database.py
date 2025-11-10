@@ -1231,7 +1231,7 @@ class PostgreSQLDatabase:
     async def get_monthly_statistics_batch(
         self, chat_id: int, year: int, month: int, limit: int, offset: int
     ) -> List[Dict]:
-        """分批获取月度统计信息"""
+        """分批获取月度统计信息 - 修复日期格式"""
         start_date = f"{year:04d}-{month:02d}-01"
         if month == 12:
             end_date = f"{year+1:04d}-01-01"
@@ -1250,12 +1250,12 @@ class PostgreSQLDatabase:
                 FROM users u
                 JOIN user_activities ua ON u.chat_id = ua.chat_id AND u.user_id = ua.user_id
                 WHERE u.chat_id = $1 
-                    AND ua.activity_date >= $2 
-                    AND ua.activity_date < $3
+                    AND ua.activity_date >= $2::date  -- 🆕 添加 ::date 转换
+                    AND ua.activity_date < $3::date   -- 🆕 添加 ::date 转换
                 GROUP BY u.user_id, u.nickname, ua.activity_name
                 ORDER BY u.user_id, ua.activity_name
                 LIMIT $4 OFFSET $5
-            """,
+                """,
                 chat_id,
                 start_date,
                 end_date,
