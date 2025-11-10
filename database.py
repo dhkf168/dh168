@@ -1392,6 +1392,77 @@ class PostgreSQLDatabase:
 
             return rankings
 
+    # === 获取月度统计数据 - 横向格式专用 ===
+
+    async def get_monthly_statistics_horizontal(
+        self, chat_id: int, year: int, month: int
+    ):
+        """获取月度统计数据 - 横向格式专用"""
+        from datetime import date
+
+        start_date = date(year, month, 1)
+        if month == 12:
+            end_date = date(year + 1, 1, 1)
+        else:
+            end_date = date(year, month + 1, 1)
+
+        async with self.pool.acquire() as conn:
+            # 获取用户基本统计
+            user_stats = await conn.fetch(
+                """
+                SELECT 
+                    u.user_id,
+                    u.nickname,
+                    SUM(COALESCE(ua.accumulated_time, 0)) as total_time,
+                    SUM(COALESCE(ua.activity_count, 0)) as total_count,
+                    SUM(COALESCE(u.total_fines, 0)) as total_fines,
+                    SUM(COALESCE(u.overtime_count, 0)) as total_overtime_count,
+                    SUM(COALESCE(u.total_overtime_time, 0)) as total_overtime_time
+                FROM users u
+                LEFT JOIN user_activities ua ON u.chat_id = ua.chat_id AND u.user_id = ua.user_id
+                    AND ua.activity_date >= $1 AND ua.activity_date < $2
+                WHERE u.chat_id = $3
+                GROUP BY u.user_id, u.nickname
+                """,
+                start_date,
+                end_date,
+                chat_id,
+            )
+
+            result = []
+            for stat in user_stats:
+                user_data = dict(stat)
+
+                # 获取用户每项活动的详细统计
+                activity_details = await conn.fetch(
+                    """
+                    SELECT 
+                        activity_name,
+                        SUM(activity_count) as activity_count,
+                        SUM(accumulated_time) as accumulated_time
+                    FROM user_activities
+                    WHERE chat_id = $1 AND user_id = $2 AND activity_date >= $3 AND activity_date < $4
+                    GROUP BY activity_name
+                    """,
+                    chat_id,
+                    user_data["user_id"],
+                    start_date,
+                    end_date,
+                )
+
+                user_data["activities"] = {}
+                for row in activity_details:
+                    activity_time = row["accumulated_time"] or 0
+                    user_data["activities"][row["activity_name"]] = {
+                        "count": row["activity_count"] or 0,
+                        "time": activity_time,
+                        "time_formatted": self.format_seconds_to_hms(activity_time),
+                    }
+
+                result.append(user_data)
+
+            return result
+
     # ========== 数据清理 ==========
 
     async def cleanup_old_data(self, days: int = 30):
