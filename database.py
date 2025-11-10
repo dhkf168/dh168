@@ -573,42 +573,57 @@ class PostgreSQLDatabase:
 
     async def reset_user_daily_data(self, chat_id: int, user_id: int):
         """
-        重置用户的每日统计数据：
-        - 清空 user_activities 当日计数
-        - 保留累计总时间和总次数
-        - 更新 last_updated 为当前日期
+        ✅ 完整重置用户的每日数据（活动 + 上下班记录 + 状态）
         """
+        today = datetime.now().date()
+
         async with self.pool.acquire() as conn:
-            # 删除 user_activities 表中的当日记录（当天起点之后的记录算下一天）
-            await conn.execute(
-                """
-                DELETE FROM user_activities
-                WHERE chat_id = $1 AND user_id = $2
-                """,
-                chat_id,
-                user_id,
-            )
+            async with conn.transaction():
+                # 1️⃣ 删除用户活动记录
+                await conn.execute(
+                    "DELETE FROM user_activities WHERE chat_id = $1 AND user_id = $2",
+                    chat_id,
+                    user_id,
+                )
 
-            # 清空用户表的当日计数类字段（但不影响历史累计）
-            await conn.execute(
-                """
-                UPDATE users
-                SET
-                    total_activity_count = 0,
-                    total_accumulated_time = 0,
-                    total_overtime_time = 0,
-                    overtime_count = 0,
-                    last_updated = CURRENT_DATE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = $1 AND user_id = $2
-                """,
-                chat_id,
-                user_id,
-            )
+                # 2️⃣ 删除当天的上下班打卡记录（兼容 timestamp / timestamptz）
+                await conn.execute(
+                    """
+                    DELETE FROM work_records
+                    WHERE chat_id = $1 AND user_id = $2
+                    AND DATE(created_at AT TIME ZONE 'Asia/Shanghai') = $3
+                    """,
+                    chat_id,
+                    user_id,
+                    today,
+                )
 
-        # 清理缓存
+                # 3️⃣ 重置用户状态与统计
+                await conn.execute(
+                    """
+                    UPDATE users SET
+                        total_activity_count = 0,
+                        total_accumulated_time = 0,
+                        total_overtime_time = 0,
+                        overtime_count = 0,
+                        current_activity = NULL,
+                        activity_start_time = NULL,
+                        work_status = NULL,
+                        last_checkin_type = NULL,
+                        last_updated = $3,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE chat_id = $1 AND user_id = $2
+                    """,
+                    chat_id,
+                    user_id,
+                    today,
+                )
+
+        # 4️⃣ 清理缓存
         self._cache.pop(f"user:{chat_id}:{user_id}", None)
-        logger.info(f"✅ 已重置用户 {user_id} 的每日统计数据（chat_id={chat_id}）")
+        logger.info(
+            f"✅ [DailyReset] 已重置用户 {user_id}（chat_id={chat_id}, 日期={today}）的活动与打卡数据"
+        )
 
     async def get_user_activity_count(
         self, chat_id: int, user_id: int, activity: str
