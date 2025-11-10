@@ -742,8 +742,20 @@ async def calculate_fine(activity: str, overtime_minutes: float) -> int:
 
 # ==================== 回复键盘 ====================
 async def get_main_keyboard(chat_id: int = None, show_admin=False):
-    """获取主回复键盘 - 优化版本"""
-    activity_limits = await db.get_activity_limits_cached()
+    """获取主回复键盘 - 确保使用最新活动配置"""
+    try:
+        # 🆕 强制刷新活动配置缓存
+        if "activity_limits" in db._cache:
+            del db._cache["activity_limits"]
+        if "activity_limits" in db._cache_ttl:
+            del db._cache_ttl["activity_limits"]
+
+        activity_limits = await db.get_activity_limits_cached()
+        logger.info(f"🔄 键盘生成 - 活动数量: {len(activity_limits)}")
+    except Exception as e:
+        logger.error(f"❌ 获取活动配置失败: {e}")
+        activity_limits = await db.get_activity_limits_cached()
+
     dynamic_buttons = []
     current_row = []
 
@@ -753,7 +765,7 @@ async def get_main_keyboard(chat_id: int = None, show_admin=False):
             dynamic_buttons.append(current_row)
             current_row = []
 
-    # 修复：使用修复后的 has_work_hours_enabled 函数
+    # 添加上下班按钮（如果启用）
     if chat_id and await has_work_hours_enabled(chat_id):
         current_row.append(KeyboardButton(text="🟢 上班"))
         current_row.append(KeyboardButton(text="🔴 下班"))
@@ -2558,218 +2570,6 @@ async def auto_end_current_activity(
 
 
 # ===== 上下班打卡功能 ======
-# async def process_work_checkin(message: types.Message, checkin_type: str):
-#     """处理上下班打卡 - 修复跨天问题版本"""
-#     chat_id = message.chat.id
-#     uid = message.from_user.id
-#     name = message.from_user.full_name
-#     now = get_beijing_time()
-#     current_time = now.strftime("%H:%M")
-
-#     user_lock = get_user_lock(chat_id, uid)
-#     async with user_lock:
-#         await db.init_group(chat_id)
-#         await db.init_user(chat_id, uid)
-
-#         user_data = await db.get_user_cached(chat_id, uid)
-#         today = str(now.date())
-
-#         # 检查是否有正在进行的活动（仅在下班打卡时检查）
-#         current_activity = user_data.get("current_activity")
-#         activity_auto_ended = False
-#         if checkin_type == "work_end" and current_activity:
-#             # 自动结束当前活动
-#             await auto_end_current_activity(chat_id, uid, user_data, now, message)
-#             activity_auto_ended = True
-
-#         today_records = await db.get_today_work_records(chat_id, uid)
-
-#         if checkin_type in today_records:
-#             action_text = "上班" if checkin_type == "work_start" else "下班"
-#             existing_time = today_records[checkin_type]["checkin_time"]
-#             existing_status = today_records[checkin_type]["status"]
-#             await message.answer(
-#                 f"❌ 您今天已经打过{action_text}卡了！\n"
-#                 f"⏰ 打卡时间：<code>{existing_time}</code>\n"
-#                 f"📊 状态：{existing_status}",
-#                 reply_markup=await get_main_keyboard(
-#                     chat_id=chat_id, show_admin=await is_admin(uid)
-#                 ),
-#                 parse_mode="HTML",
-#             )
-#             return
-
-#         if checkin_type == "work_end" and "work_start" not in today_records:
-#             await message.answer(
-#                 "❌ 您今天还没有打上班卡，无法打下班卡！\n"
-#                 "💡 请先使用'🟢 上班'按钮或 /workstart 命令打上班卡",
-#                 reply_markup=await get_main_keyboard(
-#                     chat_id=chat_id, show_admin=await is_admin(uid)
-#                 ),
-#                 parse_mode="HTML",
-#             )
-#             return
-
-#         work_hours = await db.get_group_work_time(chat_id)
-#         expected_time = work_hours[checkin_type]
-
-#         # 使用改进的跨天时间计算
-#         time_diff_minutes, expected_dt = calculate_cross_day_time_diff(
-#             now, expected_time, checkin_type
-#         )
-
-#         def format_time_diff(minutes):
-#             total_seconds = abs(int(minutes * 60))
-#             hours = total_seconds // 3600
-#             mins = (total_seconds % 3600) // 60
-#             secs = total_seconds % 60
-
-#             if hours > 0 and mins > 0 and secs > 0:
-#                 return f"{hours}小时{mins}分{secs}秒"
-#             elif hours > 0 and mins > 0:
-#                 return f"{hours}小时{mins}分"
-#             elif hours > 0:
-#                 return f"{hours}小时"
-#             elif mins > 0 and secs > 0:
-#                 return f"{mins}分{secs}秒"
-#             elif mins > 0:
-#                 return f"{mins}分"
-#             else:
-#                 return f"{secs}秒"
-
-#         time_diff_str = format_time_diff(time_diff_minutes)
-
-#         fine_amount = 0
-#         is_late_early = False
-
-#         if checkin_type == "work_start":
-#             # 上班打卡：时间差为正数表示迟到
-#             if time_diff_minutes > 0:
-#                 fine_amount = await calculate_work_fine("work_start", time_diff_minutes)
-#                 status = f"❌ 迟到 {time_diff_str}"
-#                 if fine_amount > 0:
-#                     status += f" \n💰罚款 {fine_amount}元"
-#                 emoji = "⏰"
-#                 is_late_early = True
-#             else:
-#                 status = "✅ 准时"
-#                 emoji = "👍"
-#             action_text = "上班"
-#         else:
-#             # 下班打卡：时间差为负数表示早退
-#             if time_diff_minutes < 0:
-#                 fine_amount = await calculate_work_fine(
-#                     "work_end", abs(time_diff_minutes)
-#                 )
-#                 status = f"❌ 早退 {time_diff_str}"
-#                 if fine_amount > 0:
-#                     status += f" \n💰罚款 {fine_amount}元"
-#                 emoji = "🏃"
-#                 is_late_early = True
-#             else:
-#                 status = "✅ 准时"
-#                 emoji = "👍"
-#             action_text = "下班"
-
-#         await db.add_work_record(
-#             chat_id,
-#             uid,
-#             today,
-#             checkin_type,
-#             current_time,
-#             status,
-#             time_diff_minutes,
-#             fine_amount,
-#         )
-
-#         # 显示实际选择的期望时间点
-#         expected_time_display = expected_dt.strftime("%m/%d %H:%M")
-
-#         result_msg = (
-#             f"{emoji} <b>{action_text}打卡完成</b>\n"
-#             f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
-#             f"⏰ 打卡时间：<code>{current_time}</code>\n"
-#             f"📅 期望时间：<code>{expected_time_display}</code>\n"
-#             f"📊 状态：{status}"
-#         )
-
-#         # 如果自动结束了活动，添加提示
-#         if checkin_type == "work_end" and activity_auto_ended and current_activity:
-#             result_msg += f"\n\n🔄 检测到您有未结束的活动 <code>{current_activity}</code>，已自动为您结束"
-
-#         await message.answer(
-#             result_msg,
-#             reply_markup=await get_main_keyboard(
-#                 chat_id=chat_id, show_admin=await is_admin(uid)
-#             ),
-#             parse_mode="HTML",
-#         )
-
-#         # 修复通知推送部分 - 确保迟到早退通知能正确发送
-#         if is_late_early:
-#             try:
-#                 # 确定通知类型
-#                 if checkin_type == "work_start":
-#                     status_type = "迟到"
-#                     time_detail = f"迟到 {time_diff_str}"
-#                 else:
-#                     status_type = "早退"
-#                     time_detail = f"早退 {time_diff_str}"
-
-#                 # 获取群组名称
-#                 chat_title = str(chat_id)
-#                 try:
-#                     chat_info = await bot.get_chat(chat_id)
-#                     chat_title = chat_info.title or chat_title
-#                 except Exception as e:
-#                     logger.warning(f"无法获取群组信息: {e}")
-
-#                 # 构建通知内容
-#                 notif_text = (
-#                     f"⚠️ <b>{action_text}{status_type}通知</b>\n"
-#                     f"🏢 群组：<code>{chat_title}</code>\n"
-#                     f"---------------------------------------\n"
-#                     f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
-#                     f"⏰ 打卡时间：<code>{current_time}</code>\n"
-#                     f"📅 期望时间：<code>{expected_time_display}</code>\n"
-#                     f"⏱️ {time_detail}"
-#                 )
-
-#                 if fine_amount > 0:
-#                     notif_text += f"\n💰 罚款金额：<code>{fine_amount}</code> 元"
-
-#                 # 发送通知并检查结果
-#                 sent = await NotificationService.send_notification(chat_id, notif_text)
-
-#                 if sent:
-#                     logger.info(
-#                         f"✅ 已发送{action_text}{status_type}通知：{time_detail}，罚款{fine_amount}元"
-#                     )
-#                 else:
-#                     logger.warning(
-#                         f"⚠️ {action_text}{status_type}通知发送失败，可能没有配置推送目标"
-#                     )
-
-#                     # 如果没有成功发送到任何目标，尝试发送给管理员作为兜底
-#                     try:
-#                         for admin_id in Config.ADMINS:
-#                             await bot.send_message(
-#                                 admin_id,
-#                                 f"🚨 重要：{action_text}{status_type}通知发送失败\n{notif_text}",
-#                                 parse_mode="HTML",
-#                             )
-#                         logger.info(f"✅ 已发送兜底通知给管理员")
-#                     except Exception as admin_e:
-#                         logger.error(f"❌ 发送兜底通知给管理员失败: {admin_e}")
-
-#             except Exception as e:
-#                 logger.error(f"❌ 发送上下班通知失败: {e}")
-
-#                 # 记录详细的错误信息以便调试
-#                 import traceback
-
-#                 error_details = traceback.format_exc()
-#                 logger.error(f"❌ 详细错误信息: {error_details}")
 
 
 async def process_work_checkin(message: types.Message, checkin_type: str):
@@ -3213,6 +3013,59 @@ async def handle_admin_panel_button(message: types.Message):
         "• /export - 导出数据\n\n"
     )
     await message.answer(admin_text, reply_markup=get_admin_keyboard())
+
+
+# 🆕 新增：动态活动按钮处理器
+@dp.message(lambda message: message.text and message.text.strip())
+@rate_limit(rate=10, per=60)
+async def handle_dynamic_activity_buttons(message: types.Message):
+    """处理动态生成的活动按钮点击"""
+    text = message.text.strip()
+    chat_id = message.chat.id
+    uid = message.from_user.id
+
+    # 跳过命令和特殊按钮
+    if text.startswith("/"):
+        return
+
+    special_buttons = [
+        "👑 管理员面板",
+        "🔙 返回主菜单",
+        "📤 导出数据",
+        "🔔 通知设置",
+        "🕒 上下班设置",
+        "📊 我的记录",
+        "🏆 排行榜",
+        "✅ 回座",
+        "🟢 上班",
+        "🔴 下班",
+    ]
+    if text in special_buttons:
+        return
+
+    # 🆕 关键修复：动态检查是否是活动按钮
+    try:
+        activity_limits = await db.get_activity_limits_cached()
+        if text in activity_limits.keys():
+            logger.info(f"🔘 活动按钮点击: {text} - 用户 {uid}")
+            await start_activity(message, text)
+            return
+    except Exception as e:
+        logger.error(f"❌ 处理活动按钮时出错: {e}")
+
+    # 如果不是活动按钮，显示帮助信息
+    await message.answer(
+        "请使用下方按钮或直接输入活动名称进行操作：\n\n"
+        "📝 使用方法：\n"
+        "• 点击活动按钮开始打卡\n"
+        "• 输入'回座'或点击'✅ 回座'按钮结束当前活动\n"
+        "• 点击'📊 我的记录'查看个人统计\n"
+        "• 点击'🏆 排行榜'查看群内排名",
+        reply_markup=await get_main_keyboard(
+            chat_id=chat_id, show_admin=await is_admin(uid)
+        ),
+        parse_mode="HTML",
+    )
 
 
 @dp.message(lambda message: message.text and message.text.strip() in ["🔙 返回主菜单"])
