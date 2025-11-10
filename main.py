@@ -3111,6 +3111,18 @@ async def handle_back_command(message: types.Message):
     """处理回座命令 - 优化版本"""
     await process_back(message)
 
+@dp.message(lambda message: message.text and message.text.strip() in ["🔙 返回主菜单"])
+@rate_limit(rate=5, per=60)
+async def handle_back_to_main_menu(message: types.Message):
+    """处理返回主菜单按钮 - 优化版本"""
+    uid = message.from_user.id
+    await message.answer(
+        "已返回主菜单",
+        reply_markup=await get_main_keyboard(
+            chat_id=message.chat.id, show_admin=await is_admin(uid)
+        ),
+    )
+
 
 @dp.message(lambda message: message.text and message.text.strip() in ["📊 我的记录"])
 @rate_limit(rate=10, per=60)
@@ -3240,17 +3252,7 @@ async def handle_dynamic_activity_buttons(message: types.Message):
     )
 
 
-@dp.message(lambda message: message.text and message.text.strip() in ["🔙 返回主菜单"])
-@rate_limit(rate=5, per=60)
-async def handle_back_to_main_menu(message: types.Message):
-    """处理返回主菜单按钮 - 优化版本"""
-    uid = message.from_user.id
-    await message.answer(
-        "已返回主菜单",
-        reply_markup=await get_main_keyboard(
-            chat_id=message.chat.id, show_admin=await is_admin(uid)
-        ),
-    )
+
 
 
 @dp.message(lambda message: message.text and message.text.strip() in ["📤 导出数据"])
