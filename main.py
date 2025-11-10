@@ -3243,13 +3243,14 @@ async def handle_dynamic_activity_buttons(message: types.Message):
 @dp.message(lambda message: message.text and message.text.strip() in ["🔙 返回主菜单"])
 @rate_limit(rate=5, per=60)
 async def handle_back_to_main_menu(message: types.Message):
-    """处理返回主菜单按钮 - 优化版本"""
+    """处理返回主菜单按钮 - 修复版本"""
     uid = message.from_user.id
+    chat_id = message.chat.id
+    is_admin_user = await is_admin(uid)
+
     await message.answer(
         "已返回主菜单",
-        reply_markup=await get_main_keyboard(
-            chat_id=message.chat.id, show_admin=await is_admin(uid)
-        ),
+        reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=is_admin_user),
     )
 
 
@@ -3763,76 +3764,65 @@ async def export_data(message: types.Message):
 
 # ==================== CSV导出推送功能优化 ====================
 async def optimized_monthly_export(chat_id: int, year: int, month: int):
-    """优化版月度数据导出 - 横向格式（每个用户一行）"""
+    """优化版月度数据导出，减少内存占用"""
     try:
+        # 分批处理数据，避免一次性加载所有数据
+        batch_size = 50
+        offset = 0
+
         csv_buffer = StringIO()
         writer = csv.writer(csv_buffer)
 
-        # 🆕 横向表头
-        headers = ["用户ID", "用户昵称"]
-
-        # 获取所有活动名称
-        activity_limits = await db.get_activity_limits_cached()
-        activity_names = list(activity_limits.keys())
-
-        # 为每个活动添加"次数"和"总时长"列
-        for activity in activity_names:
-            headers.extend([f"{activity}次数", f"{activity}总时长"])
-
-        # 添加总计列
-        headers.extend(
-            ["活动次数总计", "活动用时总计", "罚款总金额", "超时次数", "总超时时间"]
-        )
-
+        # 写入表头
+        headers = [
+            "用户ID",
+            "用户昵称",
+            "活动名称",
+            "活动次数",
+            "总时长(秒)",
+            "总时长",
+        ]
         writer.writerow(headers)
 
-        # 🆕 获取横向格式的月度数据
-        monthly_stats = await db.get_monthly_statistics_horizontal(chat_id, year, month)
+        has_data = False
 
-        if not monthly_stats:
-            logger.info(f"⚠️ 没有找到 {year}年{month}月 的数据")
-            return None
-
-        logger.info(f"📊 找到 {len(monthly_stats)} 个用户的月度数据")
-
-        for user_stat in monthly_stats:
-            # 用户基本信息
-            row = [user_stat["user_id"], user_stat.get("nickname", "未知用户")]
-
-            # 🆕 为每个活动添加次数和时长
-            user_activities = user_stat.get("activities", {})
-            for activity in activity_names:
-                activity_info = user_activities.get(activity, {})
-                count = activity_info.get("count", 0)
-                time_formatted = activity_info.get("time_formatted", "0小时0分钟")
-
-                # 添加次数和格式化时长
-                row.append(count)
-                row.append(time_formatted)
-
-            # 🆕 添加总计信息 - 使用 db.format_seconds_to_hms
-            row.extend(
-                [
-                    user_stat.get("total_count", 0),  # 活动次数总计
-                    db.format_seconds_to_hms(
-                        user_stat.get("total_time", 0)
-                    ),  # 🆕 修复这里
-                    user_stat.get("total_fines", 0),  # 罚款总金额
-                    user_stat.get("total_overtime_count", 0),  # 超时次数
-                    db.format_seconds_to_hms(
-                        user_stat.get("total_overtime_time", 0)
-                    ),  # 🆕 修复这里
-                ]
+        while True:
+            # 分批查询数据
+            monthly_stats = await db.get_monthly_statistics_batch(
+                chat_id, year, month, batch_size, offset
             )
 
-            writer.writerow(row)
+            if not monthly_stats:
+                break
 
-        csv_content = csv_buffer.getvalue()
-        logger.info(f"✅ 月度数据导出完成，数据大小: {len(csv_content)} 字节")
-        return csv_content
+            for user_stat in monthly_stats:
+                has_data = True
+                user_activities = user_stat.get("activities", {})
+
+                for activity_name, activity_info in user_activities.items():
+                    row = [
+                        user_stat["user_id"],
+                        user_stat.get("nickname", "未知用户"),
+                        activity_name,
+                        activity_info.get("count", 0),
+                        activity_info.get("time", 0),
+                        activity_info.get("time_formatted", "0小时0分钟"),
+                    ]
+                    writer.writerow(row)
+
+            offset += batch_size
+
+            # 释放内存
+            del monthly_stats
+            await asyncio.sleep(0.1)  # 短暂让出控制权
+
+        if not has_data:
+            return None
+
+        return csv_buffer.getvalue()
 
     except Exception as e:
-        logger.error(f"❌ 月度导出优化版失败: {e}", exc_info=True)
+        logger.error(f"❌ 月度导出优化版失败: {e}")
         return None
 
 
