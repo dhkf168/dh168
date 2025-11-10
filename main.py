@@ -3243,14 +3243,13 @@ async def handle_dynamic_activity_buttons(message: types.Message):
 @dp.message(lambda message: message.text and message.text.strip() in ["🔙 返回主菜单"])
 @rate_limit(rate=5, per=60)
 async def handle_back_to_main_menu(message: types.Message):
-    """处理返回主菜单按钮 - 修复版本"""
+    """处理返回主菜单按钮 - 优化版本"""
     uid = message.from_user.id
-    chat_id = message.chat.id
-    is_admin_user = await is_admin(uid)
-
     await message.answer(
         "已返回主菜单",
-        reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=is_admin_user),
+        reply_markup=await get_main_keyboard(
+            chat_id=message.chat.id, show_admin=await is_admin(uid)
+        ),
     )
 
 
