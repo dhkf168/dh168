@@ -2392,10 +2392,10 @@ async def cmd_at(message: types.Message):
 @dp.message(Command("refresh_keyboard"))
 @rate_limit(rate=5, per=60)
 async def cmd_refresh_keyboard(message: types.Message):
-    """强制刷新键盘 - 优化版本"""
+    """强制刷新键盘 - 确保新活动立即显示"""
     uid = message.from_user.id
     await message.answer(
-        "🔄 键盘已刷新",
+        "🔄 键盘已刷新，新活动现在可用",
         reply_markup=await get_main_keyboard(
             chat_id=message.chat.id, show_admin=await is_admin(uid)
         ),
