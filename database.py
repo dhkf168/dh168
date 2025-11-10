@@ -811,23 +811,46 @@ class PostgreSQLDatabase:
     async def update_activity_config(
         self, activity: str, max_times: int, time_limit: int
     ):
-        """更新活动配置"""
+        """更新活动配置 - 修复新增活动无法打卡问题"""
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO activity_configs (activity_name, max_times, time_limit)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (activity_name) 
-                DO UPDATE SET 
-                    max_times = EXCLUDED.max_times,
-                    time_limit = EXCLUDED.time_limit,
-                    created_at = CURRENT_TIMESTAMP
-            """,
-                activity,
-                max_times,
-                time_limit,
-            )
+            async with conn.transaction():
+                # 更新或新增活动配置
+                await conn.execute(
+                    """
+                    INSERT INTO activity_configs (activity_name, max_times, time_limit)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (activity_name) 
+                    DO UPDATE SET 
+                        max_times = EXCLUDED.max_times,
+                        time_limit = EXCLUDED.time_limit,
+                        created_at = CURRENT_TIMESTAMP
+                    """,
+                    activity,
+                    max_times,
+                    time_limit,
+                )
+
+                # ✅ 初始化默认罚款配置，避免新增活动无法打卡
+                default_fines = getattr(Config, "DEFAULT_FINE_RATES", {}).get(
+                    "default", {}
+                )
+                if not default_fines:
+                    default_fines = {"30min": 5, "60min": 10, "120min": 20}
+
+                # 批量插入罚款配置
+                values = [(activity, ts, amt) for ts, amt in default_fines.items()]
+                await conn.executemany(
+                    """
+                    INSERT INTO fine_configs (activity_name, time_segment, fine_amount)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (activity_name, time_segment) DO NOTHING
+                    """,
+                    values,
+                )
+
+            # 清理缓存
             self._cache.pop("activity_limits", None)
+            logger.info(f"✅ 活动配置更新完成: {activity}，并初始化罚款配置")
 
     async def delete_activity_config(self, activity: str):
         """删除活动配置"""
@@ -839,7 +862,8 @@ class PostgreSQLDatabase:
                 await conn.execute(
                     "DELETE FROM fine_configs WHERE activity_name = $1", activity
                 )
-            self._cache.pop("activity_limits", None)
+        self._cache.pop("activity_limits", None)
+        logger.info(f"🗑 已删除活动配置及罚款: {activity}")
 
     # ========== 罚款配置操作 ==========
     async def get_fine_rates(self) -> Dict:
@@ -1442,7 +1466,9 @@ class PostgreSQLDatabase:
                         return False
 
             except (asyncio.TimeoutError, ConnectionError) as e:
-                logger.warning(f"⚠️ [DB] 健康检查网络异常 ({e.__class__.__name__})，正在重试... ({attempt+1}/2)")
+                logger.warning(
+                    f"⚠️ [DB] 健康检查网络异常 ({e.__class__.__name__})，正在重试... ({attempt+1}/2)"
+                )
                 if attempt == 0:  # ✅ 只在第一次重试时等待
                     await asyncio.sleep(1)
 
@@ -1532,4 +1558,3 @@ class PostgreSQLDatabase:
 
 # 全局数据库实例
 db = PostgreSQLDatabase()
-
