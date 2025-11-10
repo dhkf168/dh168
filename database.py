@@ -811,10 +811,10 @@ class PostgreSQLDatabase:
     async def update_activity_config(
         self, activity: str, max_times: int, time_limit: int
     ):
-        """更新活动配置 - 完整修复版"""
+        """更新活动配置 - 修复新增活动无法打卡问题"""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                # 1. 更新活动配置
+                # 更新或新增活动配置
                 await conn.execute(
                     """
                     INSERT INTO activity_configs (activity_name, max_times, time_limit)
@@ -830,98 +830,40 @@ class PostgreSQLDatabase:
                     time_limit,
                 )
 
-                # 2. ✅ 关键修复：为新活动初始化罚款配置
-                # 先检查是否已存在罚款配置
-                existing_fines = await conn.fetch(
-                    "SELECT time_segment FROM fine_configs WHERE activity_name = $1",
-                    activity,
+                # ✅ 初始化默认罚款配置，避免新增活动无法打卡
+                default_fines = getattr(Config, "DEFAULT_FINE_RATES", {}).get(
+                    "default", {}
+                )
+                if not default_fines:
+                    default_fines = {"30min": 5, "60min": 10, "120min": 20}
+
+                # 批量插入罚款配置
+                values = [(activity, ts, amt) for ts, amt in default_fines.items()]
+                await conn.executemany(
+                    """
+                    INSERT INTO fine_configs (activity_name, time_segment, fine_amount)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (activity_name, time_segment) DO NOTHING
+                    """,
+                    values,
                 )
 
-                # 如果还没有罚款配置，创建默认配置
-                if not existing_fines:
-                    # 使用通用默认配置
-                    default_fines = Config.DEFAULT_FINE_RATES.get(activity, {})
-
-                    # 如果活动特定的配置不存在，使用通用默认配置
-                    if not default_fines:
-                        default_fines = Config.DEFAULT_FINE_RATES.get("default", {})
-
-                    # 如果还是没有配置，创建基础默认配置
-                    if not default_fines:
-                        default_fines = {"30min": 5, "60min": 10, "120min": 20}
-                        logger.info(f"📝 为活动 {activity} 创建基础默认罚款配置")
-
-                    # 插入罚款配置
-                    for time_segment, amount in default_fines.items():
-                        await conn.execute(
-                            """
-                            INSERT INTO fine_configs (activity_name, time_segment, fine_amount)
-                            VALUES ($1, $2, $3)
-                            ON CONFLICT (activity_name, time_segment) DO NOTHING
-                            """,
-                            activity,
-                            time_segment,
-                            amount,
-                        )
-
-                    logger.info(f"✅ 为活动 {activity} 初始化罚款配置: {default_fines}")
-                else:
-                    logger.info(f"📝 活动 {activity} 已有罚款配置，跳过初始化")
-
-            # 3. 清理所有相关缓存
+            # 清理缓存
             self._cache.pop("activity_limits", None)
-            # 清理罚款配置缓存（如果存在）
-            fines_cache_key = f"fine_rates_{activity}"
-            self._cache.pop(fines_cache_key, None)
+            logger.info(f"✅ 活动配置更新完成: {activity}，并初始化罚款配置")
 
-            logger.info(
-                f"✅ 活动配置更新完成: {activity} (次数限制: {max_times}, 时间限制: {time_limit}分钟)"
-            )
-
-    async def delete_activity_config(self, activity: str) -> bool:
-        """删除活动配置 - 安全版本"""
-        try:
-            # 参数验证
-            if not activity or not activity.strip():
-                logger.error("❌ 删除活动配置失败: 活动名称为空")
-                return False
-
-            async with self.pool.acquire() as conn:
-                async with conn.transaction():
-                    # 检查活动是否存在
-                    activity_exists = await conn.fetchval(
-                        "SELECT 1 FROM activity_configs WHERE activity_name = $1",
-                        activity,
-                    )
-
-                    if not activity_exists:
-                        logger.warning(f"⚠️ 活动不存在，无需删除: {activity}")
-                        return False
-
-                    # 1. 删除活动配置
-                    delete_count = await conn.execute(
-                        "DELETE FROM activity_configs WHERE activity_name = $1",
-                        activity,
-                    )
-
-                    # 2. 删除罚款配置
-                    await conn.execute(
-                        "DELETE FROM fine_configs WHERE activity_name = $1", activity
-                    )
-
-                    logger.info(
-                        f"🗑️ 已删除活动配置: {activity}, 影响行数: {delete_count}"
-                    )
-
-            # 3. 清理缓存
-            await self._clear_activity_related_cache(activity)
-
-            logger.info(f"✅ 活动配置删除完成: {activity}")
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ 删除活动配置失败: {activity}, 错误: {e}")
-            return False
+    async def delete_activity_config(self, activity: str):
+        """删除活动配置"""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM activity_configs WHERE activity_name = $1", activity
+                )
+                await conn.execute(
+                    "DELETE FROM fine_configs WHERE activity_name = $1", activity
+                )
+        self._cache.pop("activity_limits", None)
+        logger.info(f"🗑 已删除活动配置及罚款: {activity}")
 
     # ========== 罚款配置操作 ==========
     async def get_fine_rates(self) -> Dict:
