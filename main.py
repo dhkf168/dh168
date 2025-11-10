@@ -2221,6 +2221,55 @@ async def cmd_reset_status(message: types.Message):
         await message.answer(f"❌ 检查重置状态失败: {e}")
 
 
+@dp.message(Command("reset_work"))
+@admin_required
+@rate_limit(rate=2, per=60)
+async def cmd_reset_work(message: types.Message):
+    """管理员重置用户今日上下班记录"""
+    args = message.text.split()
+    chat_id = message.chat.id
+
+    if len(args) != 2:
+        await message.answer(
+            "❌ 用法: /reset_work <用户ID>\n" "💡 例如: /reset_work 123456789",
+            reply_markup=await get_main_keyboard(chat_id, show_admin=True),
+        )
+        return
+
+    try:
+        target_uid = int(args[1])
+        today = datetime.now().date()
+
+        # 删除用户今日的上下班记录
+        async with db.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM work_records WHERE chat_id = $1 AND user_id = $2 AND record_date = $3",
+                chat_id,
+                target_uid,
+                today,
+            )
+
+        # 清理用户缓存
+        db._cache.pop(f"user:{chat_id}:{target_uid}", None)
+
+        await message.answer(
+            f"✅ 已重置用户 <code>{target_uid}</code> 的今日上下班记录\n"
+            f"📅 重置日期: {today}\n"
+            f"💡 用户现在可以重新打卡",
+            reply_markup=await get_main_keyboard(chat_id, show_admin=True),
+            parse_mode="HTML",
+        )
+
+        logger.info(
+            f"👑 管理员 {message.from_user.id} 重置了用户 {target_uid} 的上下班记录"
+        )
+
+    except ValueError:
+        await message.answer("❌ 用户ID必须是数字")
+    except Exception as e:
+        await message.answer(f"❌ 重置失败: {e}")
+
+
 @dp.message(Command("testpush"))
 @admin_required
 @rate_limit(rate=3, per=60)
@@ -2668,6 +2717,25 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             logger.info(f"[{trace_id}] 🔁 检测到重复{action_text}打卡，终止处理。")
             return
 
+        # 🆕 添加异常情况检查：已经下班但又打上班卡
+        if checkin_type == "work_start":
+            has_work_end_today = await db.has_work_record_today(
+                chat_id, uid, "work_end"
+            )
+            if has_work_end_today:
+                today_records = await db.get_today_work_records(chat_id, uid)
+                end_record = today_records.get("work_end")
+                end_time = end_record["checkin_time"] if end_record else "未知时间"
+
+                await message.answer(
+                    f"❌ 您今天已经在 <code>{end_time}</code> 打过下班卡，无法再打上班卡！\n"
+                    f"💡 如需重新打卡，请联系管理员或等待次日自动重置",
+                    reply_markup=await get_main_keyboard(chat_id, await is_admin(uid)),
+                    parse_mode="HTML",
+                )
+                logger.info(f"[{trace_id}] 🔁 检测到异常：下班后再次上班打卡")
+                return
+
         # ✅ 自动结束活动（仅下班）
         current_activity = user_data.get("current_activity")
         activity_auto_ended = False
@@ -2693,6 +2761,26 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 )
                 logger.warning(f"[{trace_id}] ⚠️ 用户试图下班打卡但未上班")
                 return
+
+        # 🆕 添加时间范围检查（放在获取工作时间设置之前）
+        if not await is_valid_checkin_time(chat_id, checkin_type, now):
+            work_hours = await db.get_group_work_time(chat_id)
+            if checkin_type == "work_start":
+                expected_time = work_hours["work_start"]
+                time_range = "打卡前2小时至打卡后4小时"
+            else:
+                expected_time = work_hours["work_end"]
+                time_range = "打卡前4小时至打卡后2小时"
+
+            await message.answer(
+                f"⏰ 当前不在合理的打卡时间范围内！\n"
+                f"📅 期望时间: <code>{expected_time}</code>\n"
+                f"🕒 允许范围: {time_range}",
+                reply_markup=await get_main_keyboard(chat_id, await is_admin(uid)),
+                parse_mode="HTML",
+            )
+            logger.info(f"[{trace_id}] ⏰ 打卡时间范围检查失败，终止处理")
+            return
 
         # ✅ 获取工作时间设置
         work_hours = await db.get_group_work_time(chat_id)
@@ -2885,6 +2973,53 @@ def calculate_cross_day_time_diff(
     return time_diff_minutes, expected_dt
 
 
+# 🆕 直接添加时间范围检查函数
+async def is_valid_checkin_time(
+    chat_id: int, checkin_type: str, current_time: datetime
+) -> bool:
+    """
+    检查是否在合理的打卡时间范围内
+    返回: True-有效, False-无效
+    """
+    try:
+        work_hours = await db.get_group_work_time(chat_id)
+
+        if checkin_type == "work_start":
+            # 上班打卡允许前后范围：前2小时至后4小时
+            expected_hour, expected_minute = map(
+                int, work_hours["work_start"].split(":")
+            )
+            expected_time = current_time.replace(
+                hour=expected_hour, minute=expected_minute, second=0, microsecond=0
+            )
+            earliest = expected_time - timedelta(hours=4)
+            latest = expected_time + timedelta(hours=4)
+        else:
+            # 下班打卡允许前后范围：前4小时至后2小时
+            expected_hour, expected_minute = map(int, work_hours["work_end"].split(":"))
+            expected_time = current_time.replace(
+                hour=expected_hour, minute=expected_minute, second=0, microsecond=0
+            )
+            earliest = expected_time - timedelta(hours=4)
+            latest = expected_time + timedelta(hours=4)
+
+        is_valid = earliest <= current_time <= latest
+
+        if not is_valid:
+            logger.warning(
+                f"⚠️ 打卡时间范围检查失败: {checkin_type}, "
+                f"当前: {current_time.strftime('%H:%M')}, "
+                f"允许: {earliest.strftime('%H:%M')} ~ {latest.strftime('%H:%M')}"
+            )
+
+        return is_valid
+
+    except Exception as e:
+        logger.error(f"❌ 检查打卡时间范围失败: {e}")
+        # 如果检查失败，默认允许打卡（避免影响正常使用）
+        return True
+
+
 # ============ 文本命令处理优化 =================
 @dp.message(Command("workrecord"))
 @rate_limit(rate=5, per=60)
@@ -3032,16 +3167,18 @@ async def handle_admin_panel_button(message: types.Message):
         "• /delwork - 基本移除，保留历史记录\n"
         "• /delwork clear - 移除并清除所有记录\n"
         "• /workstatus - 查看当前上下班功能状态\n"
+        "• /reset_work 用户ID - 可以重置用户记录\n"
         "• \n"
         "• /reset <用户ID> - 重置用户数据\n"
         "• \n"
         "• /setresettime <小时> <分钟> - 设置每日重置时间\n"
+        "• /setworkfine <work_start|work_end> <时间段> <金额> - 设置上下班罚款\n"
         "• \n"
         "• /setfine <活动名> <时间段> <金额> - 设置活动罚款费率\n"
         "• /setfines_all <t1> <f1> [<t2> <f2> ...] - 为所有活动统一设置分段罚款\n"
-        "• /setworkfine <work_start|work_end> <时间段> <金额> - 设置上下班罚款\n"
         "• \n"
         "• /showsettings - 查看当前群设置\n"
+        "• //reset_status - 查看重置状态\n"
         "• \n"
         "• /exportmonthly - 导出月度数据\n"
         "• /exportmonthly 2024 1 - 导出指定年月数据\n"
