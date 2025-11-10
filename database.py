@@ -1497,6 +1497,7 @@ class PostgreSQLDatabase:
         """安全清理旧数据 - 不会抛出异常，适合在定时任务中使用"""
         try:
             await self.cleanup_old_data(days)
+            logger.info(f"✅ 安全清理完成: 清理了超过 {days} 天的数据")
             return True
         except Exception as e:
             logger.warning(f"⚠️ 安全清理数据失败（不影响主要功能）: {e}")
