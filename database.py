@@ -606,10 +606,9 @@ class PostgreSQLDatabase:
                         total_accumulated_time = 0,
                         total_overtime_time = 0,
                         overtime_count = 0,
+                        total_fines = 0,
                         current_activity = NULL,
                         activity_start_time = NULL,
-                        work_status = NULL,
-                        last_checkin_type = NULL,
                         last_updated = $3,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE chat_id = $1 AND user_id = $2
