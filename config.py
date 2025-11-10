@@ -9,11 +9,11 @@ beijing_tz = timezone(timedelta(hours=8))
 
 class Config:
     # Bot 配置
-    TOKEN = os.getenv("BOT_TOKEN", "8301902909:AAG9FVqGgvntWNYNgbIrYROXrfFMlM0PRkA")
+    TOKEN = os.getenv("BOT_TOKEN", "")
 
     # 数据库配置
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
+        "DATABASE_URL", ""
     )
 
     # 性能优化配置
@@ -87,7 +87,7 @@ class Config:
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
     # 管理员配置
-    ADMIN_IDS = os.getenv("ADMIN_IDS", "8356418002,6607669683")
+    ADMIN_IDS = os.getenv("ADMIN_IDS", "")
     ADMINS = [int(x.strip()) for x in ADMIN_IDS.split(",") if x.strip()]
 
     # 性能配置优化
@@ -386,3 +386,4 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
+
