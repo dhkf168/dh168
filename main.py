@@ -422,7 +422,7 @@ class MessageFormatter:
         if count >= max_times:
             message += f"\n🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
 
-        message += f"\n💡提示：活动完成后请及时点击'✅ 回座'按钮"
+        message += f"\n💡提示：活动完成后请及时输入'回座'或点击'✅ 回座'按钮"
 
         return message
 
@@ -902,7 +902,7 @@ def get_admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👑 管理员面板"), KeyboardButton(text="📤 导出数据")],
-            # [KeyboardButton(text="🔔 通知设置"), KeyboardButton(text="🕒 上下班设置")],
+            [KeyboardButton(text="🔔 通知设置"), KeyboardButton(text="🕒 上下班设置")],
             [KeyboardButton(text="🔙 返回主菜单")],
         ],
         resize_keyboard=True,
@@ -1137,6 +1137,21 @@ async def _start_activity_locked(
         )
         return
 
+    # 🆕 新增：检查活动人数限制
+    max_users = await db.get_activity_user_limit(chat_id, act)
+    if max_users > 1:  # 1表示不限制
+        current_users = await db.get_current_activity_users_count(chat_id, act)
+        if current_users >= max_users:
+            await message.answer(
+                f"❌ 活动 '<code>{act}</code>' 正在进行的人数已达上限 (<code>{current_users}/{max_users}</code>)！\n"
+                f"请等待其他用户结束活动后再尝试。",
+                reply_markup=await get_main_keyboard(
+                    chat_id=chat_id, show_admin=await is_admin(uid)
+                ),
+                parse_mode="HTML",
+            )
+            return
+
     can_perform, reason = await can_perform_activities(chat_id, uid)
     if not can_perform:
         await message.answer(
@@ -1281,7 +1296,7 @@ async def cmd_help(message: types.Message):
         "• <code>/showworktime</code> - 显示当前设置\n"
         "• <code>/workstatus</code> - 查看上下班功能状态\n"
         "• <code>/delwork</code> - 移除上下班功能（保留记录）\n"
-        "• <code>/delwork_clear</code> - 移除功能并清除记录\n"
+        "• <code>/delwork clear</code> - 移除功能并清除记录\n"
         "• <code>/resetworktime</code> - 重置为默认时间\n"
         "📊 查看记录：\n"
         "• 点击 <code>📊 我的记录</code> 查看个人统计\n"
@@ -1419,11 +1434,14 @@ async def cmd_unbind_group(message: types.Message):
 @admin_required
 @rate_limit(rate=3, per=30)
 async def cmd_addactivity(message: types.Message):
-    """添加新活动 - 修复缓存版本"""
+    """添加新活动 - 修复缓存版本（支持人数限制）"""
     args = message.text.split()
-    if len(args) != 4:
+    if len(args) not in [4, 5]:  # 🆕 支持可选的人数限制参数
         await message.answer(
-            Config.MESSAGES["addactivity_usage"],
+            "❌ 用法：/addactivity <活动名> <次数> <分钟> [人数限制]\n"
+            "例如：/addactivity 吃饭 3 60        # 不限制人数\n"
+            "例如：/addactivity 会议室 5 120 3   # 限制最多3人同时使用\n\n"
+            "💡 人数限制可选，默认为1（不限制）",
             reply_markup=await get_main_keyboard(
                 chat_id=message.chat.id, show_admin=True
             ),
@@ -1432,28 +1450,51 @@ async def cmd_addactivity(message: types.Message):
 
     try:
         act, max_times, time_limit = args[1], int(args[2]), int(args[3])
+        max_users = int(args[4]) if len(args) == 5 else 1  # 🆕 可选的人数限制
+
+        # 🆕 验证人数限制参数
+        if max_users < 1:
+            await message.answer(
+                "❌ 人数限制必须大于等于 1！",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+            )
+            return
+
         existed = await db.activity_exists(act)
-        await db.update_activity_config(act, max_times, time_limit)
+        # 🆕 调用更新后的方法，传入人数限制参数
+        await db.update_activity_config(act, max_times, time_limit, max_users)
 
         # 🆕 关键修复：强制刷新活动配置缓存
         await db.force_refresh_activity_cache()
 
+        # 🆕 构建响应消息，包含人数限制信息
         if existed:
-            await message.answer(
-                f"✅ 已修改活动 <code>{act}</code>，次数上限 <code>{max_times}</code>，时间限制 <code>{time_limit}</code> 分钟",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-                parse_mode="HTML",
-            )
+            message_text = f"✅ 已修改活动 <code>{act}</code>，次数上限 <code>{max_times}</code>，时间限制 <code>{time_limit}</code> 分钟"
         else:
-            await message.answer(
-                f"✅ 已添加新活动 <code>{act}</code>，次数上限 <code>{max_times}</code>，时间限制 <code>{time_limit}</code> 分钟",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-                parse_mode="HTML",
-            )
+            message_text = f"✅ 已添加新活动 <code>{act}</code>，次数上限 <code>{max_times}</code>，时间限制 <code>{time_limit}</code> 分钟"
+
+        # 🆕 添加人数限制信息到响应消息
+        if max_users > 1:
+            message_text += f"，人数限制 <code>{max_users}</code> 人"
+        else:
+            message_text += "，不限制人数"
+
+        await message.answer(
+            message_text,
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+            parse_mode="HTML",
+        )
+    except ValueError:
+        await message.answer(
+            "❌ 参数格式错误！请确保次数、分钟和人数限制都是有效的数字",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
     except Exception as e:
         await message.answer(
             f"❌ 添加/修改活动失败：{e}",
@@ -1729,6 +1770,165 @@ async def cmd_setfines_all(message: types.Message):
                 chat_id=message.chat.id, show_admin=True
             ),
         )
+
+
+# ========== 参与活动人数限制 =========
+@dp.message(Command("setuserlimit"))
+@admin_required
+@rate_limit(rate=3, per=30)
+async def cmd_setuserlimit(message: types.Message):
+    """设置活动人数限制"""
+    args = message.text.split()
+    if len(args) != 4:
+        await message.answer(
+            "❌ 用法：/setuserlimit <活动名> <人数限制>\n"
+            "例如：/setuserlimit 吃饭 3\n"
+            "💡 设置为 1 表示不限制人数",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
+        return
+
+    try:
+        act = args[1]
+        max_users = int(args[2])
+
+        if not await db.activity_exists(act):
+            await message.answer(
+                f"❌ 活动 '<code>{act}</code>' 不存在！",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+        if max_users < 1:
+            await message.answer(
+                "❌ 人数限制必须大于等于 1！",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+            )
+            return
+
+        chat_id = message.chat.id
+        await db.set_activity_user_limit(chat_id, act, max_users)
+
+        if max_users == 1:
+            await message.answer(
+                f"✅ 已移除活动 '<code>{act}</code>' 的人数限制",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"✅ 已设置活动 '<code>{act}</code>' 的人数限制为 <code>{max_users}</code> 人",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+                parse_mode="HTML",
+            )
+
+    except ValueError:
+        await message.answer(
+            "❌ 人数限制必须是有效的数字！",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
+    except Exception as e:
+        await message.answer(
+            f"❌ 设置失败：{e}",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
+
+
+@dp.message(Command("showuserlimits"))
+@admin_required
+@rate_limit(rate=5, per=60)
+async def cmd_showuserlimits(message: types.Message):
+    """显示所有活动的人数限制"""
+    chat_id = message.chat.id
+
+    try:
+        # 获取活动配置
+        activity_limits = await db.get_activity_limits_cached()
+        # 获取人数限制
+        user_limits = await db.get_all_activity_user_limits(chat_id)
+
+        if not user_limits:
+            await message.answer(
+                "📊 当前没有设置任何活动人数限制",
+                reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
+            )
+            return
+
+        text = "📊 活动人数限制设置：\n\n"
+        for act, max_users in user_limits.items():
+            if act in activity_limits:
+                current_count = await db.get_current_activity_users_count(chat_id, act)
+                status = "🟢" if current_count < max_users else "🔴"
+                if max_users == 1:
+                    text += f"• {act}：不限人数 {status} (当前: {current_count}人)\n"
+                else:
+                    text += f"• {act}：{max_users}人 {status} (当前: {current_count}/{max_users}人)\n"
+
+        text += f"\n💡 使用 /setuserlimit <活动名> <人数> 来设置限制\n"
+        text += f"💡 设置为 1 表示不限制人数"
+
+        await message.answer(
+            text,
+            reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        await message.answer(
+            f"❌ 获取人数限制失败：{e}",
+            reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
+        )
+
+
+@dp.message(Command("removeuserlimit"))
+@admin_required
+@rate_limit(rate=3, per=30)
+async def cmd_removeuserlimit(message: types.Message):
+    """移除活动人数限制"""
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer(
+            "❌ 用法：/removeuserlimit <活动名>",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
+        return
+
+    act = args[1]
+    chat_id = message.chat.id
+
+    if not await db.activity_exists(act):
+        await message.answer(
+            f"❌ 活动 '<code>{act}</code>' 不存在！",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    await db.remove_activity_user_limit(chat_id, act)
+    await message.answer(
+        f"✅ 已移除活动 '<code>{act}</code>' 的人数限制",
+        reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
+        parse_mode="HTML",
+    )
 
 
 # ===== 上下班罚款 =====
@@ -2109,72 +2309,6 @@ async def cmd_delwork(message: types.Message):
     )
 
     logger.info(f"👤 管理员 {message.from_user.id} 移除了群组 {chat_id} 的上下班功能")
-
-
-@dp.message(Command("delwork_clear"))
-@admin_required
-@rate_limit(rate=3, per=30)
-async def cmd_delwork_clear(message: types.Message):
-    """移除上下班功能并清除所有记录 - 新命令"""
-    chat_id = message.chat.id
-
-    # 修复：使用修复后的 has_work_hours_enabled 函数
-    if not await has_work_hours_enabled(chat_id):
-        await message.answer(
-            "❌ 当前群组没有设置上下班功能",
-            reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
-        )
-        return
-
-    work_hours = await db.get_group_work_time(chat_id)
-    old_start = work_hours.get("work_start")
-    old_end = work_hours.get("work_end")
-
-    # 重置为默认时间（相当于禁用功能）
-    await db.update_group_work_time(
-        chat_id,
-        Config.DEFAULT_WORK_HOURS["work_start"],
-        Config.DEFAULT_WORK_HOURS["work_end"],
-    )
-
-    records_cleared = 0
-    # ✅ 清除所有上下班记录
-    conn = await db.get_connection()
-    try:
-        result = await conn.execute(
-            "DELETE FROM work_records WHERE chat_id = $1", chat_id
-        )
-        # result 形如 "DELETE 5"
-        records_cleared = (
-            int(result.split()[-1]) if result and result.startswith("DELETE") else 0
-        )
-    finally:
-        await db.release_connection(conn)
-
-    # 🆕 清理用户缓存，确保立即生效
-    group_members = await db.get_group_members(chat_id)
-    for user_data in group_members:
-        user_id = user_data["user_id"]
-        db._cache.pop(f"user:{chat_id}:{user_id}", None)
-
-    success_msg = (
-        f"✅ 已移除上下班功能并清除所有记录\n"
-        f"🗑️ 已删除设置：<code>{old_start}</code> - <code>{old_end}</code>\n"
-        f"📊 同时清除了 <code>{records_cleared}</code> 条上下班记录\n"
-        f"\n🔧 上下班按钮已隐藏\n"
-        f"🎯 现在用户可以正常进行其他活动打卡\n"
-        f"🔄 键盘已自动刷新"
-    )
-
-    await message.answer(
-        success_msg,
-        reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
-        parse_mode="HTML",
-    )
-
-    logger.info(
-        f"👤 管理员 {message.from_user.id} 移除了群组 {chat_id} 的上下班功能并清除 {records_cleared} 条记录"
-    )
 
 
 @dp.message(Command("workstatus"))
@@ -3367,7 +3501,7 @@ async def handle_admin_panel_button(message: types.Message):
         "• \n"
         "• /setworktime 9:00 18:00 - 设置上下班时间\n"
         "• /delwork - 基本移除，保留历史记录\n"
-        "• /delwork_clear - 移除并清除所有记录\n"
+        "• /delwork clear - 移除并清除所有记录\n"
         "• /workstatus - 查看当前上下班功能状态\n"
         "• /worktime  - 查看当前群组工作时间设置\n"
         "• /reset_work 用户ID - 可以重置用户记录\n"
@@ -3396,6 +3530,9 @@ async def handle_admin_panel_button(message: types.Message):
         "• /refresh_keyboard - 强制刷新键盘显示新活动\n"
         "• /debug_work - 调试上下班功能状态\n"
         "• \n"
+        "• /setuserlimit <活动名> <人数> - 设置活动人数限制\n"
+        "• /showuserlimits - 显示活动人数限制\n"
+        "• /removeuserlimit <活动名> - 移除活动人数限制\n"
     )
     await message.answer(admin_text, reply_markup=get_admin_keyboard())
 
@@ -3456,7 +3593,7 @@ async def handle_dynamic_activity_buttons(message: types.Message):
 @dp.message(lambda message: message.text and message.text.strip() in ["📤 导出数据"])
 @rate_limit(rate=5, per=60)
 async def handle_export_data_button(message: types.Message):
-    """处理导出数据按钮点击 - 修复版"""
+    """处理导出数据按钮点击 - 优化版本"""
     if not await is_admin(message.from_user.id):
         await message.answer(
             Config.MESSAGES["no_permission"],
@@ -3465,14 +3602,7 @@ async def handle_export_data_button(message: types.Message):
             ),
         )
         return
-
-    chat_id = message.chat.id
-    await message.answer("⏳ 正在导出数据，请稍候.")
-    try:
-        await export_and_push_csv(chat_id)
-        await message.answer("✅ 数据已导出并推送到绑定的群组或频道！")
-    except Exception as e:
-        await message.answer(f"❌ 导出失败：{e}")
+    await export_data(message)
 
 
 @dp.message(
@@ -3987,6 +4117,26 @@ async def set_group_id(message: types.Message, state: FSMContext):
         await message.answer("❌ 请输入有效的群组ID！")
 
 
+async def export_data(message: types.Message):
+    """导出数据 - 优化版本"""
+    if not await is_admin(message.from_user.id):
+        await message.answer(
+            Config.MESSAGES["no_permission"],
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=False
+            ),
+        )
+        return
+
+    chat_id = message.chat.id
+    await message.answer("⏳ 正在导出数据...")
+    try:
+        await export_and_push_csv(chat_id)
+        await message.answer("✅ 数据导出完成！")
+    except Exception as e:
+        await message.answer(f"❌ 导出失败：{e}")
+
+
 # ==================== CSV导出推送功能优化 ====================
 async def optimized_monthly_export(chat_id: int, year: int, month: int):
     """优化版月度数据导出，每个用户一行，活动横向排列"""
@@ -4068,10 +4218,11 @@ async def export_and_push_csv(
         target_date = target_date.date()
 
     if not file_name:
-        if target_date is not None:
-            date_str = target_date.strftime("%Y%m%d")
-        else:
-            date_str = get_beijing_time().strftime("%Y%m%d_%H%M%S")
+        date_str = (
+            target_date.strftime("%Y%m%d")
+            if target_date is not None
+            else get_beijing_time().strftime("%Y%m%d_%H%M%S")
+        )
         file_name = f"group_{chat_id}_statistics_{date_str}.csv"
 
     csv_buffer = StringIO()
@@ -4146,8 +4297,6 @@ async def export_and_push_csv(
             f"📊 群组：<b>{chat_title}</b>\n"
             f"📅 统计日期：<code>{(target_date.strftime('%Y-%m-%d') if target_date else get_beijing_time().strftime('%Y-%m-%d'))}</code>\n"
             f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>"
-            f"----------------------------------\n"
-            f"💾 包含每个用户的所有活动统计和总计信息"
         )
 
         # 先把文件发回到当前 chat（可选）
@@ -4484,14 +4633,14 @@ async def daily_reset_task():
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):
     """
-    在每日重置后延迟导出昨日数据 - 修复版
+    在每日重置后延迟导出昨日数据
     """
     try:
         logger.info(f"⏳ 群组 {chat_id} 将在 {delay_minutes} 分钟后导出昨日数据...")
         # 延迟执行
         await asyncio.sleep(delay_minutes * 60)
 
-        # 🆕 关键修复：明确获取昨天的日期
+        # 获取昨天的北京时间与日期
         yesterday_dt = get_beijing_time() - timedelta(days=1)
         yesterday_date = yesterday_dt.date()
 
@@ -4503,7 +4652,7 @@ async def delayed_export(chat_id: int, delay_minutes: int = 30):
             chat_id,
             to_admin_if_no_group=True,
             file_name=file_name,
-            target_date=yesterday_date,  # 明确传递昨天日期
+            target_date=yesterday_date,
         )
 
         logger.info(f"✅ 群组 {chat_id} 昨日({yesterday_date}) 数据导出并推送完成")
@@ -5522,4 +5671,3 @@ async def preload_frequent_data():
 #     except Exception as e:
 #         logger.error(f"💥 机器人异常退出: {e}")
 #         sys.exit(1)
-
