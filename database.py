@@ -157,6 +157,7 @@ class PostgreSQLDatabase:
                     activity_name TEXT PRIMARY KEY,
                     max_times INTEGER,
                     time_limit INTEGER,
+                    max_users INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
@@ -225,6 +226,7 @@ class PostgreSQLDatabase:
                     activity,
                     limits["max_times"],
                     limits["time_limit"],
+                    limits.get("max_users", 1),
                 )
 
             # 初始化罚款配置
@@ -905,25 +907,31 @@ class PostgreSQLDatabase:
             return row is not None
 
     async def update_activity_config(
-        self, activity: str, max_times: int, time_limit: int
+        self,
+        activity: str,
+        max_times: int,
+        time_limit: int,
+        max_users: int = 1,  # 🆕 新增max_users参数
     ):
-        """更新活动配置 - 修复新增活动无法打卡问题"""
+        """更新活动配置 - 修复新增活动无法打卡问题（支持人数限制）"""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                # 更新或新增活动配置
+                # 🆕 更新或新增活动配置（包含max_users字段）
                 await conn.execute(
                     """
-                    INSERT INTO activity_configs (activity_name, max_times, time_limit)
-                    VALUES ($1, $2, $3)
+                    INSERT INTO activity_configs (activity_name, max_times, time_limit, max_users)
+                    VALUES ($1, $2, $3, $4)
                     ON CONFLICT (activity_name) 
                     DO UPDATE SET 
                         max_times = EXCLUDED.max_times,
                         time_limit = EXCLUDED.time_limit,
+                        max_users = EXCLUDED.max_users,  -- 🆕 更新人数限制字段
                         created_at = CURRENT_TIMESTAMP
                     """,
                     activity,
                     max_times,
                     time_limit,
+                    max_users,
                 )
 
                 # ✅ 初始化默认罚款配置，避免新增活动无法打卡
@@ -946,7 +954,9 @@ class PostgreSQLDatabase:
 
             # 清理缓存
             self._cache.pop("activity_limits", None)
-            logger.info(f"✅ 活动配置更新完成: {activity}，并初始化罚款配置")
+            logger.info(
+                f"✅ 活动配置更新完成: {activity}，次数上限: {max_times}，时间限制: {time_limit}分钟，人数限制: {max_users}人"
+            )
 
     async def delete_activity_config(self, activity: str):
         """删除活动配置"""
@@ -960,6 +970,52 @@ class PostgreSQLDatabase:
                 )
         self._cache.pop("activity_limits", None)
         logger.info(f"🗑 已删除活动配置及罚款: {activity}")
+
+    # ========== 活动人数限制相关操作 ==========
+    async def set_activity_user_limit(
+        self, chat_id: int, activity: str, max_users: int
+    ):
+        """设置活动人数限制"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE activity_configs SET max_users = $1 WHERE activity_name = $2",
+                max_users,
+                activity,
+            )
+            # 清理活动配置缓存
+            self._cache.pop("activity_limits", None)
+
+    async def get_activity_user_limit(self, chat_id: int, activity: str) -> int:
+        """获取活动人数限制"""
+        limits = await self.get_activity_limits()
+        return limits.get(activity, {}).get("max_users", 1)
+
+    async def get_all_activity_user_limits(self, chat_id: int) -> Dict[str, int]:
+        """获取所有活动的人数限制"""
+        limits = await self.get_activity_limits()
+        return {act: config.get("max_users", 1) for act, config in limits.items()}
+
+    async def remove_activity_user_limit(self, chat_id: int, activity: str):
+        """移除活动人数限制（恢复为默认值1）"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE activity_configs SET max_users = 1 WHERE activity_name = $1",
+                activity,
+            )
+            # 清理活动配置缓存
+            self._cache.pop("activity_limits", None)
+
+    async def get_current_activity_users_count(
+        self, chat_id: int, activity: str
+    ) -> int:
+        """获取当前正在进行指定活动的用户数量"""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE chat_id = $1 AND current_activity = $2",
+                chat_id,
+                activity,
+            )
+            return count or 0
 
     # ========== 罚款配置操作 ==========
     async def get_fine_rates(self) -> Dict:
