@@ -393,7 +393,7 @@ class MessageFormatter:
     def create_dashed_line():
         """创建短虚线分割线"""
         return MessageFormatter.format_copyable_text(
-            "----------------------------------"
+            "MessageFormatter.format_copyable_text("----------------------------------")"
         )
 
     @staticmethod
@@ -1099,8 +1099,7 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
                         notif_text = (
                             f"🚨 <b>自动回座超时通知</b>\n"
                             f"🏢 群组：<code>{chat_title}</code>\n"
-                            f"MessageFormatter.format_copyable_text("
-                            - -----------------------")\n"
+                            f"MessageFormatter.format_copyable_text("------------------------")\n"
                             f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
                             f"📝 活动：<code>{act}</code>\n"
                             f"⏰ 回座时间：<code>{get_beijing_time().strftime('%m/%d %H:%M:%S')}</code>\n"
@@ -3256,8 +3255,7 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 notif_text = (
                     f"⚠️ <b>{action_text}{status_type}通知</b>\n"
                     f"🏢 群组：<code>{chat_title}</code>\n"
-                    f"MessageFormatter.format_copyable_text("
-                    - -----------------------")\n"
+                    f"MessageFormatter.format_copyable_text("------------------------")\n"
                     f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
                     f"⏰ 打卡时间：<code>{current_time}</code>\n"
                     f"📅 期望时间：<code>{expected_time_display}</code>\n"
@@ -4011,8 +4009,7 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
                     notif_text = (
                         f"🚨 <b>超时回座通知</b>\n"
                         f"🏢 群组：<code>{chat_title}</code>\n"
-                        f"MessageFormatter.format_copyable_text("
-                        - -----------------------")\n"
+                        f"MessageFormatter.format_copyable_text("------------------------")\n"
                         f"👤 用户：{MessageFormatter.format_user_link(uid, user_data.get('nickname', '未知用户'))}\n"
                         f"📝 活动：<code>{act}</code>\n"
                         f"⏰ 回座时间：<code>{now.strftime('%m/%d %H:%M:%S')}</code>\n"
@@ -4421,7 +4418,7 @@ async def export_monthly_csv(
             f"🏢 群组：<code>{chat_title}</code>\n"
             f"📅 统计月份：<code>{year}年{month}月</code>\n"
             f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-            f"MessageFormatter.format_copyable_text(" - -----------------------")\n"
+            f"MessageFormatter.format_copyable_text("------------------------")\n"
             f"💾 包含每个用户的月度活动统计"
         )
 
