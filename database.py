@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 from config import Config
 import asyncpg
 from asyncpg.pool import Pool
+from datetime import date, datetime
 
 logger = logging.getLogger("GroupCheckInBot")
 
@@ -571,58 +572,112 @@ class PostgreSQLDatabase:
 
         logger.info(f"🔍 [数据库操作完成] 用户{user_id} 活动{activity} 完成更新")
 
-    async def reset_user_daily_data(self, chat_id: int, user_id: int):
+    async def reset_user_daily_data(
+        self, chat_id: int, user_id: int, target_date: date | None = None
+    ):
         """
-        ✅ 完整重置用户的每日数据（活动 + 上下班记录 + 状态）
+        ✅ 修复版：重置用户每日数据但保留历史记录
+        只重置累计统计和当前状态，不删除历史记录
         """
-        today = datetime.now().date()
-
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                # 1️⃣ 删除用户活动记录
-                await conn.execute(
-                    "DELETE FROM user_activities WHERE chat_id = $1 AND user_id = $2",
-                    chat_id,
-                    user_id,
+        try:
+            # 验证和设置目标日期
+            if target_date is None:
+                target_date = datetime.now().date()
+            elif not isinstance(target_date, date):
+                raise ValueError(
+                    f"target_date必须是date类型，得到: {type(target_date)}"
                 )
 
-                # 2️⃣ 删除当天的上下班打卡记录（兼容 timestamp / timestamptz）
+            # 获取重置前的用户状态（用于日志）
+            user_before = await self.get_user(chat_id, user_id)
+
+            # 🆕 计算新的日期（重置后的日期）
+            new_date = target_date
+            # 如果是重置昨天的数据，那么新的日期应该是今天
+            if target_date < datetime.now().date():
+                new_date = datetime.now().date()
+
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    # 🆕 关键修改：不再删除历史记录！
+                    # ❌ 删除这2个DELETE操作：
+                    # - 不要删除 user_activities 记录（保留导出所需的历史数据）
+                    # - 不要删除 work_records 记录（保留上下班打卡历史）
+
+                    # 3. 只重置用户统计数据和状态
+                    await conn.execute(
+                        """
+                        UPDATE users SET
+                            total_activity_count = 0,
+                            total_accumulated_time = 0,
+                            total_overtime_time = 0,
+                            overtime_count = 0,
+                            total_fines = 0,
+                            current_activity = NULL,
+                            activity_start_time = NULL,
+                            last_updated = $3,  # 🆕 更新为新的日期
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE chat_id = $1 AND user_id = $2
+                        """,
+                        chat_id,
+                        user_id,
+                        new_date,  # 🆕 使用新的日期
+                    )
+
+            # 4. 清理相关缓存
+            cache_keys = [
+                f"user:{chat_id}:{user_id}",
+                f"group:{chat_id}",
+                "activity_limits",
+            ]
+            for key in cache_keys:
+                self._cache.pop(key, None)
+                self._cache_ttl.pop(key, None)
+
+            # 记录详细的重置日志
+            logger.info(
+                f"✅ 数据重置完成（保留历史记录）: 用户 {user_id} (群组 {chat_id})\n"
+                f"   📅 重置日期: {target_date} → {new_date}\n"
+                f"   💾 历史记录: 已保留（支持后续导出）\n"
+                f"   📊 重置前状态:\n"
+                f"       - 活动次数: {user_before.get('total_activity_count', 0) if user_before else 0}\n"
+                f"       - 累计时长: {user_before.get('total_accumulated_time', 0) if user_before else 0}秒\n"
+                f"       - 罚款金额: {user_before.get('total_fines', 0) if user_before else 0}元\n"
+                f"       - 超时次数: {user_before.get('overtime_count', 0) if user_before else 0}\n"
+                f"       - 当前活动: {user_before.get('current_activity', '无') if user_before else '无'}"
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ 重置用户数据失败 {chat_id}-{user_id}: {e}")
+            return False
+
+    async def update_user_last_updated(
+        self, chat_id: int, user_id: int, date_obj: date
+    ):
+        """
+        更新用户最后更新时间
+        """
+        try:
+            async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
-                    DELETE FROM work_records
-                    WHERE chat_id = $1 AND user_id = $2
-                    AND DATE(created_at AT TIME ZONE 'Asia/Shanghai') = $3
+                    UPDATE users 
+                    SET last_updated = $1, updated_at = CURRENT_TIMESTAMP 
+                    WHERE chat_id = $2 AND user_id = $3
                     """,
+                    date_obj,
                     chat_id,
                     user_id,
-                    today,
                 )
 
-                # 3️⃣ 重置用户状态与统计
-                await conn.execute(
-                    """
-                    UPDATE users SET
-                        total_activity_count = 0,
-                        total_accumulated_time = 0,
-                        total_overtime_time = 0,
-                        overtime_count = 0,
-                        total_fines = 0,
-                        current_activity = NULL,
-                        activity_start_time = NULL,
-                        last_updated = $3,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE chat_id = $1 AND user_id = $2
-                    """,
-                    chat_id,
-                    user_id,
-                    today,
-                )
+            # 清理用户缓存
+            self._cache.pop(f"user:{chat_id}:{user_id}", None)
+            logger.debug(f"✅ 更新最后更新时间: {chat_id}-{user_id} -> {date_obj}")
 
-        # 4️⃣ 清理缓存
-        self._cache.pop(f"user:{chat_id}:{user_id}", None)
-        logger.info(
-            f"✅ [DailyReset] 已重置用户 {user_id}（chat_id={chat_id}, 日期={today}）的活动与打卡数据"
-        )
+        except Exception as e:
+            logger.error(f"❌ 更新最后更新时间失败 {chat_id}-{user_id}: {e}")
 
     async def get_user_activity_count(
         self, chat_id: int, user_id: int, activity: str
@@ -1048,14 +1103,40 @@ class PostgreSQLDatabase:
             self._cache.pop("push_settings", None)
 
     # ========== 统计和导出相关 ==========
-    async def get_group_statistics(self, chat_id: int) -> List[Dict]:
-        """获取群组统计信息"""
-        today = datetime.now().date()
+    async def get_group_statistics(
+        self, chat_id: int, target_date: Optional[date] = None
+    ) -> List[Dict]:
+        """获取群组统计信息，按指定日期查询 - 修复重置后查询问题"""
+        if target_date is None:
+            target_date = datetime.now().date()
+
         async with self.pool.acquire() as conn:
+            # 🆕 关键修复：不依赖 last_updated，直接查询 user_activities 表
             users = await conn.fetch(
-                "SELECT user_id, nickname, total_accumulated_time, total_activity_count, total_fines, overtime_count, total_overtime_time FROM users WHERE chat_id = $1 AND last_updated = $2",
+                """
+                SELECT DISTINCT u.user_id, u.nickname, 
+                    COALESCE(ua_total.total_accumulated_time, 0) as total_accumulated_time,
+                    COALESCE(ua_total.total_activity_count, 0) as total_activity_count,
+                    COALESCE(u.total_fines, 0) as total_fines,
+                    COALESCE(u.overtime_count, 0) as overtime_count,
+                    COALESCE(u.total_overtime_time, 0) as total_overtime_time
+                FROM users u
+                LEFT JOIN (
+                    SELECT user_id, 
+                        SUM(accumulated_time) as total_accumulated_time,
+                        SUM(activity_count) as total_activity_count
+                    FROM user_activities 
+                    WHERE chat_id = $1 AND activity_date = $2
+                    GROUP BY user_id
+                ) ua_total ON u.user_id = ua_total.user_id
+                WHERE u.chat_id = $1 
+                AND EXISTS (
+                    SELECT 1 FROM user_activities 
+                    WHERE chat_id = $1 AND user_id = u.user_id AND activity_date = $2
+                )
+                """,
                 chat_id,
-                today,
+                target_date,
             )
 
             result = []
@@ -1068,12 +1149,16 @@ class PostgreSQLDatabase:
                     user_data["total_overtime_time"]
                 )
 
-                # 获取用户的活动详情
+                # 获取用户在 target_date 的活动详情
                 activities = await conn.fetch(
-                    "SELECT activity_name, activity_count, accumulated_time FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3",
+                    """
+                    SELECT activity_name, activity_count, accumulated_time
+                    FROM user_activities
+                    WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3
+                    """,
                     chat_id,
                     user["user_id"],
-                    today,
+                    target_date,
                 )
 
                 user_data["activities"] = {}
@@ -1085,6 +1170,7 @@ class PostgreSQLDatabase:
                             row["accumulated_time"]
                         ),
                     }
+
                 result.append(user_data)
 
             return result
@@ -1148,11 +1234,10 @@ class PostgreSQLDatabase:
             return result
 
     # ========== 月度统计 ==========
-
     async def get_monthly_statistics(
         self, chat_id: int, year: int = None, month: int = None
     ) -> List[Dict]:
-        """获取月度统计信息 - 修复日期格式问题"""
+        """获取月度统计信息 - 修复重置后数据丢失问题"""
         if year is None or month is None:
             today = datetime.now()
             year = today.year
@@ -1165,21 +1250,30 @@ class PostgreSQLDatabase:
             end_date = date(year, month + 1, 1)
 
         async with self.pool.acquire() as conn:
+            # 🆕 关键修复：直接从 user_activities 和 work_records 计算所有统计
             monthly_stats = await conn.fetch(
                 """
                 SELECT 
                     u.user_id,
                     u.nickname,
+                    -- 从 user_activities 计算活动统计
                     SUM(COALESCE(ua.accumulated_time, 0)) as total_time,
                     SUM(COALESCE(ua.activity_count, 0)) as total_count,
-                    SUM(COALESCE(u.total_fines, 0)) as total_fines,
-                    SUM(COALESCE(u.overtime_count, 0)) as total_overtime_count,
-                    SUM(COALESCE(u.total_overtime_time, 0)) as total_overtime_time
+                    -- 🆕 从 work_records 计算罚款（不依赖 users.total_fines）
+                    COALESCE((
+                        SELECT SUM(fine_amount) 
+                        FROM work_records wr 
+                        WHERE wr.chat_id = u.chat_id AND wr.user_id = u.user_id 
+                        AND wr.record_date >= $1::date AND wr.record_date < $2::date
+                    ), 0) as total_fines,
+                    -- 🆕 超时统计需要重新设计计算逻辑（暂时设为0，或从其他方式计算）
+                    0 as total_overtime_count,
+                    0 as total_overtime_time
                 FROM users u
                 LEFT JOIN user_activities ua ON u.chat_id = ua.chat_id AND u.user_id = ua.user_id
-                    AND ua.activity_date >= $1::date AND ua.activity_date < $2::date  -- 🆕 添加 ::date 转换
+                    AND ua.activity_date >= $1::date AND ua.activity_date < $2::date
                 WHERE u.chat_id = $3
-                GROUP BY u.user_id, u.nickname
+                GROUP BY u.user_id, u.nickname, u.chat_id
                 ORDER BY total_time DESC
                 """,
                 start_date,
@@ -1191,12 +1285,11 @@ class PostgreSQLDatabase:
             for stat in monthly_stats:
                 user_data = dict(stat)
                 user_data["total_time"] = user_data["total_time"] or 0
-                user_data["total_overtime_time"] = user_data["total_overtime_time"] or 0
                 user_data["total_time_formatted"] = self.format_seconds_to_hms(
                     user_data["total_time"]
                 )
                 user_data["total_overtime_time_formatted"] = self.format_seconds_to_hms(
-                    user_data["total_overtime_time"]
+                    user_data["total_overtime_time"] or 0
                 )
 
                 # 获取用户每项活动的详细统计
@@ -1207,7 +1300,7 @@ class PostgreSQLDatabase:
                         SUM(activity_count) as activity_count,
                         SUM(accumulated_time) as accumulated_time
                     FROM user_activities
-                    WHERE chat_id = $1 AND user_id = $2 AND activity_date >= $3::date AND activity_date < $4::date  -- 🆕 添加 ::date 转换
+                    WHERE chat_id = $1 AND user_id = $2 AND activity_date >= $3::date AND activity_date < $4::date
                     GROUP BY activity_name
                     """,
                     chat_id,
@@ -1221,7 +1314,7 @@ class PostgreSQLDatabase:
                     activity_time = row["accumulated_time"] or 0
                     user_data["activities"][row["activity_name"]] = {
                         "count": row["activity_count"] or 0,
-                        "time": activity_time,  # 🆕 保持原始秒数，用于计算
+                        "time": activity_time,
                         "time_formatted": self.format_seconds_to_hms(activity_time),
                     }
 
@@ -1338,10 +1431,11 @@ class PostgreSQLDatabase:
 
             return result
 
+    # ========== 月度工作统计 ==========
     async def get_monthly_activity_ranking(
         self, chat_id: int, year: int = None, month: int = None
     ) -> Dict[str, List]:
-        """获取月度活动排行榜 - 修复日期格式"""
+        """获取月度活动排行榜 - 修复重置后数据丢失问题"""
         if year is None or month is None:
             today = datetime.now()
             year = today.year
@@ -1358,17 +1452,19 @@ class PostgreSQLDatabase:
             rankings = {}
 
             for activity in activity_limits.keys():
+                # 🆕 关键修复：直接从 user_activities 计算，不依赖 users 表
                 rows = await conn.fetch(
                     """
                     SELECT 
-                        u.user_id,
+                        ua.user_id,
                         u.nickname,
                         SUM(COALESCE(ua.accumulated_time, 0)) as total_time,
                         SUM(COALESCE(ua.activity_count, 0)) as total_count
                     FROM user_activities ua
                     JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                    WHERE ua.chat_id = $1 AND ua.activity_name = $2 AND ua.activity_date >= $3::date AND ua.activity_date < $4::date  -- 🆕 添加 ::date 转换
-                    GROUP BY u.user_id, u.nickname
+                    WHERE ua.chat_id = $1 AND ua.activity_name = $2 
+                        AND ua.activity_date >= $3::date AND ua.activity_date < $4::date
+                    GROUP BY ua.user_id, u.nickname
                     ORDER BY total_time DESC
                     LIMIT 10
                     """,
