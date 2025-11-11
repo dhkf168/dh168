@@ -222,7 +222,7 @@ class PostgreSQLDatabase:
             # 初始化活动配置
             for activity, limits in Config.DEFAULT_ACTIVITY_LIMITS.items():
                 await conn.execute(
-                    "INSERT INTO activity_configs (activity_name, max_times, time_limit) VALUES ($1, $2, $3, $4) ON CONFLICT (activity_name) DO NOTHING",
+                    "INSERT INTO activity_configs (activity_name, max_times, time_limit, max_users) VALUES ($1, $2, $3, $4) ON CONFLICT (activity_name) DO NOTHING",
                     activity,
                     limits["max_times"],
                     limits["time_limit"],
