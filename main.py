@@ -422,7 +422,7 @@ class MessageFormatter:
         if count >= max_times:
             message += f"\n🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
 
-        message += f"\n💡提示：活动完成后请及时输入'回座'或点击'✅ 回座'按钮"
+        message += f"\n💡提示：活动完成后请及时点击'✅ 回座'按钮"
 
         return message
 
@@ -5522,3 +5522,4 @@ async def preload_frequent_data():
 #     except Exception as e:
 #         logger.error(f"💥 机器人异常退出: {e}")
 #         sys.exit(1)
+
