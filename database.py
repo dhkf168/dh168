@@ -650,7 +650,7 @@ class PostgreSQLDatabase:
                             total_fines = 0,
                             current_activity = NULL,
                             activity_start_time = NULL,
-                            last_updated = $3,  # 🆕 更新为新的日期
+                            last_updated = $3,  -- 🆕 更新为新的日期
                             updated_at = CURRENT_TIMESTAMP
                         WHERE chat_id = $1 AND user_id = $2
                         """,
@@ -1858,3 +1858,4 @@ class PostgreSQLDatabase:
 
 # 全局数据库实例
 db = PostgreSQLDatabase()
+
