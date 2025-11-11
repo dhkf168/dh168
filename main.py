@@ -392,7 +392,7 @@ class MessageFormatter:
     @staticmethod
     def create_dashed_line():
         """创建短虚线分割线"""
-        return "----------------------------------"
+        return MessageFormatter.format_copyable_text("----------------------------------")
 
     @staticmethod
     def format_copyable_text(text: str):
@@ -5671,3 +5671,4 @@ async def preload_frequent_data():
 #     except Exception as e:
 #         logger.error(f"💥 机器人异常退出: {e}")
 #         sys.exit(1)
+
