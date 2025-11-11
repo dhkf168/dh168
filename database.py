@@ -195,39 +195,51 @@ class PostgreSQLDatabase:
 
             logger.info("✅ 数据库表创建完成")
 
-    async def _create_indexes(self):
-        """创建性能索引"""
-        async with self.pool.acquire() as conn:
-            indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_user_activities_main ON user_activities (chat_id, user_id, activity_date)",
-                "CREATE INDEX IF NOT EXISTS idx_user_activities_activity ON user_activities (activity_name)",
-                "CREATE INDEX IF NOT EXISTS idx_work_records_main ON work_records (chat_id, user_id, record_date)",
-                "CREATE INDEX IF NOT EXISTS idx_users_main ON users (chat_id, user_id)",
-                "CREATE INDEX IF NOT EXISTS idx_users_updated ON users (last_updated)",
-                "CREATE INDEX IF NOT EXISTS idx_user_activities_date ON user_activities (activity_date)",
-                "CREATE INDEX IF NOT EXISTS idx_work_records_date ON work_records (record_date)",
-            ]
-
-            for index_sql in indexes:
-                try:
-                    await conn.execute(index_sql)
-                except Exception as e:
-                    logger.warning(f"创建索引失败: {e}")
-
-            logger.info("✅ 数据库索引创建完成")
-
     async def _initialize_default_data(self):
-        """初始化默认数据"""
+        """初始化默认数据 - 修复版本"""
         async with self.pool.acquire() as conn:
-            # 初始化活动配置
-            for activity, limits in Config.DEFAULT_ACTIVITY_LIMITS.items():
-                await conn.execute(
-                    "INSERT INTO activity_configs (activity_name, max_times, time_limit, max_users) VALUES ($1, $2, $3, $4) ON CONFLICT (activity_name) DO NOTHING",
-                    activity,
-                    limits["max_times"],
-                    limits["time_limit"],
-                    limits.get("max_users", 1),
+            # 🆕 修复：先检查表结构
+            try:
+                # 检查 activity_configs 表是否包含 max_users 列
+                has_max_users = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'activity_configs' AND column_name = 'max_users'
+                    )
+                """
                 )
+
+                logger.info(
+                    f"📊 检测到 activity_configs 表 {'包含' if has_max_users else '不包含'} max_users 列"
+                )
+
+            except Exception as e:
+                logger.error(f"❌ 检查表结构失败: {e}")
+                has_max_users = False  # 默认假设列不存在
+
+            # 初始化活动配置 - 根据表结构决定插入方式
+            for activity, limits in Config.DEFAULT_ACTIVITY_LIMITS.items():
+                try:
+                    if has_max_users:
+                        # 表包含 max_users 列，使用完整插入
+                        await conn.execute(
+                            "INSERT INTO activity_configs (activity_name, max_times, time_limit, max_users) VALUES ($1, $2, $3, $4) ON CONFLICT (activity_name) DO NOTHING",
+                            activity,
+                            limits["max_times"],
+                            limits["time_limit"],
+                            limits.get("max_users", 1),
+                        )
+                    else:
+                        # 表不包含 max_users 列，使用简化插入
+                        await conn.execute(
+                            "INSERT INTO activity_configs (activity_name, max_times, time_limit) VALUES ($1, $2, $3) ON CONFLICT (activity_name) DO NOTHING",
+                            activity,
+                            limits["max_times"],
+                            limits["time_limit"],
+                        )
+                except Exception as e:
+                    logger.error(f"❌ 插入活动配置失败 {activity}: {e}")
 
             # 初始化罚款配置
             for activity, fines in Config.DEFAULT_FINE_RATES.items():
