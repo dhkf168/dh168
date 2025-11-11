@@ -9,11 +9,11 @@ beijing_tz = timezone(timedelta(hours=8))
 
 class Config:
     # Bot 配置
-    TOKEN = os.getenv("BOT_TOKEN", "")
+    TOKEN = os.getenv("BOT_TOKEN", "8301902909:AAG9FVqGgvntWNYNgbIrYROXrfFMlM0PRkA")
 
     # 数据库配置
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", ""
+        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
     )
 
     # 性能优化配置
@@ -87,7 +87,7 @@ class Config:
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
     # 管理员配置
-    ADMIN_IDS = os.getenv("ADMIN_IDS", "")
+    ADMIN_IDS = os.getenv("ADMIN_IDS", "8356418002,6607669683")
     ADMINS = [int(x.strip()) for x in ADMIN_IDS.split(",") if x.strip()]
 
     # 性能配置优化
@@ -135,6 +135,12 @@ class Config:
         "小厕": {"5": 50, "10": 100},
         "大厕": {"15": 80, "30": 200},
         "抽烟": {"10": 200, "30": 500},
+    }
+    DEFAULT_ACTIVITY_LIMITS = {
+        "吃饭": {"max_times": 3, "time_limit": 60, "max_users": 1},
+        "小厕": {"max_times": 6, "time_limit": 15, "max_users": 1},
+        "大厕": {"max_times": 3, "time_limit": 30, "max_users": 1},
+        "抽烟": {"max_times": 5, "time_limit": 10, "max_users": 1},
     }
 
     DEFAULT_WORK_FINE_RATES = {
@@ -386,4 +392,3 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
-
