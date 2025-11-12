@@ -157,7 +157,6 @@ class PostgreSQLDatabase:
                     activity_name TEXT PRIMARY KEY,
                     max_times INTEGER,
                     time_limit INTEGER,
-                    max_users INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
@@ -217,50 +216,16 @@ class PostgreSQLDatabase:
             logger.info("✅ 数据库索引创建完成")
 
     async def _initialize_default_data(self):
-        """初始化默认数据 - 修复版本"""
+        """初始化默认数据"""
         async with self.pool.acquire() as conn:
-            # 🆕 修复：先确保表结构正确
-            try:
-                # 强制添加 max_users 列（如果不存在）
-                await conn.execute("""
-                    DO $$ 
-                    BEGIN 
-                        IF NOT EXISTS (
-                            SELECT 1 FROM information_schema.columns 
-                            WHERE table_name = 'activity_configs' AND column_name = 'max_users'
-                        ) THEN
-                            ALTER TABLE activity_configs ADD COLUMN max_users INTEGER DEFAULT 1;
-                        END IF;
-                    END $$;
-                """)
-                logger.info("✅ 确保 activity_configs 表包含 max_users 列")
-            except Exception as e:
-                logger.error(f"❌ 确保表结构失败: {e}")
-                # 继续执行，不要因为表结构调整失败而中断
-
             # 初始化活动配置
             for activity, limits in Config.DEFAULT_ACTIVITY_LIMITS.items():
-                try:
-                    await conn.execute(
-                        "INSERT INTO activity_configs (activity_name, max_times, time_limit, max_users) VALUES ($1, $2, $3, $4) ON CONFLICT (activity_name) DO NOTHING",
-                        activity,
-                        limits["max_times"],
-                        limits["time_limit"],
-                        limits.get("max_users", 1),
-                    )
-                except Exception as e:
-                    logger.error(f"❌ 插入活动配置失败 {activity}: {e}")
-                    # 尝试使用简化版本作为备选
-                    try:
-                        await conn.execute(
-                            "INSERT INTO activity_configs (activity_name, max_times, time_limit) VALUES ($1, $2, $3) ON CONFLICT (activity_name) DO NOTHING",
-                            activity,
-                            limits["max_times"],
-                            limits["time_limit"],
-                        )
-                        logger.info(f"✅ 使用备选方案插入活动配置: {activity}")
-                    except Exception as e2:
-                        logger.error(f"❌ 备选方案也失败 {activity}: {e2}")
+                await conn.execute(
+                    "INSERT INTO activity_configs (activity_name, max_times, time_limit) VALUES ($1, $2, $3) ON CONFLICT (activity_name) DO NOTHING",
+                    activity,
+                    limits["max_times"],
+                    limits["time_limit"],
+                )
 
             # 初始化罚款配置
             for activity, fines in Config.DEFAULT_FINE_RATES.items():
@@ -532,7 +497,7 @@ class PostgreSQLDatabase:
         fine_amount: int = 0,
         is_overtime: bool = False,
     ):
-        """完成用户活动 - 修复计数问题版本"""
+        """完成用户活动 - 修复重置后数据更新问题"""
         today = datetime.now().date()
 
         logger.info(
@@ -568,7 +533,7 @@ class PostgreSQLDatabase:
                     """,
                     chat_id,
                     user_id,
-                    today,
+                    today,  # 🆕 确保使用今天日期
                     activity,
                     elapsed_time,
                 )
@@ -634,12 +599,7 @@ class PostgreSQLDatabase:
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    # 🆕 关键修改：不再删除历史记录！
-                    # ❌ 删除这2个DELETE操作：
-                    # - 不要删除 user_activities 记录（保留导出所需的历史数据）
-                    # - 不要删除 work_records 记录（保留上下班打卡历史）
 
-                    # 3. 只重置用户统计数据和状态
                     await conn.execute(
                         """
                         UPDATE users SET
@@ -650,13 +610,13 @@ class PostgreSQLDatabase:
                             total_fines = 0,
                             current_activity = NULL,
                             activity_start_time = NULL,
-                            last_updated = $3,  
+                            last_updated = $3,  # 🆕 更新为新的日期
                             updated_at = CURRENT_TIMESTAMP
                         WHERE chat_id = $1 AND user_id = $2
                         """,
                         chat_id,
                         user_id,
-                        new_date, 
+                        new_date,  # 🆕 使用新的日期
                     )
 
             # 4. 清理相关缓存
@@ -717,8 +677,9 @@ class PostgreSQLDatabase:
     async def get_user_activity_count(
         self, chat_id: int, user_id: int, activity: str
     ) -> int:
-        """获取用户今日活动次数"""
+        """获取用户今日活动次数 - 修复函数签名"""
         today = datetime.now().date()
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT activity_count FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3 AND activity_name = $4",
@@ -746,11 +707,13 @@ class PostgreSQLDatabase:
             )
             return row["accumulated_time"] if row else 0
 
+    # database.py - 修改 get_user_all_activities 方法
     async def get_user_all_activities(
         self, chat_id: int, user_id: int
     ) -> Dict[str, Dict]:
-        """获取用户所有活动数据"""
+        """获取用户所有活动数据 - 修复函数签名"""
         today = datetime.now().date()
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT activity_name, activity_count, accumulated_time FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3",
@@ -940,31 +903,25 @@ class PostgreSQLDatabase:
             return row is not None
 
     async def update_activity_config(
-        self,
-        activity: str,
-        max_times: int,
-        time_limit: int,
-        max_users: int = 1,  # 🆕 新增max_users参数
+        self, activity: str, max_times: int, time_limit: int
     ):
-        """更新活动配置 - 修复新增活动无法打卡问题（支持人数限制）"""
+        """更新活动配置 - 修复新增活动无法打卡问题"""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                # 🆕 更新或新增活动配置（包含max_users字段）
+                # 更新或新增活动配置
                 await conn.execute(
                     """
-                    INSERT INTO activity_configs (activity_name, max_times, time_limit, max_users)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO activity_configs (activity_name, max_times, time_limit)
+                    VALUES ($1, $2, $3)
                     ON CONFLICT (activity_name) 
                     DO UPDATE SET 
                         max_times = EXCLUDED.max_times,
                         time_limit = EXCLUDED.time_limit,
-                        max_users = EXCLUDED.max_users,  -- 🆕 更新人数限制字段
                         created_at = CURRENT_TIMESTAMP
                     """,
                     activity,
                     max_times,
                     time_limit,
-                    max_users,
                 )
 
                 # ✅ 初始化默认罚款配置，避免新增活动无法打卡
@@ -987,9 +944,7 @@ class PostgreSQLDatabase:
 
             # 清理缓存
             self._cache.pop("activity_limits", None)
-            logger.info(
-                f"✅ 活动配置更新完成: {activity}，次数上限: {max_times}，时间限制: {time_limit}分钟，人数限制: {max_users}人"
-            )
+            logger.info(f"✅ 活动配置更新完成: {activity}，并初始化罚款配置")
 
     async def delete_activity_config(self, activity: str):
         """删除活动配置"""
@@ -1003,52 +958,6 @@ class PostgreSQLDatabase:
                 )
         self._cache.pop("activity_limits", None)
         logger.info(f"🗑 已删除活动配置及罚款: {activity}")
-
-    # ========== 活动人数限制相关操作 ==========
-    async def set_activity_user_limit(
-        self, chat_id: int, activity: str, max_users: int
-    ):
-        """设置活动人数限制"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE activity_configs SET max_users = $1 WHERE activity_name = $2",
-                max_users,
-                activity,
-            )
-            # 清理活动配置缓存
-            self._cache.pop("activity_limits", None)
-
-    async def get_activity_user_limit(self, chat_id: int, activity: str) -> int:
-        """获取活动人数限制"""
-        limits = await self.get_activity_limits()
-        return limits.get(activity, {}).get("max_users", 1)
-
-    async def get_all_activity_user_limits(self, chat_id: int) -> Dict[str, int]:
-        """获取所有活动的人数限制"""
-        limits = await self.get_activity_limits()
-        return {act: config.get("max_users", 1) for act, config in limits.items()}
-
-    async def remove_activity_user_limit(self, chat_id: int, activity: str):
-        """移除活动人数限制（恢复为默认值1）"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE activity_configs SET max_users = 1 WHERE activity_name = $1",
-                activity,
-            )
-            # 清理活动配置缓存
-            self._cache.pop("activity_limits", None)
-
-    async def get_current_activity_users_count(
-        self, chat_id: int, activity: str
-    ) -> int:
-        """获取当前正在进行指定活动的用户数量"""
-        async with self.pool.acquire() as conn:
-            count = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE chat_id = $1 AND current_activity = $2",
-                chat_id,
-                activity,
-            )
-            return count or 0
 
     # ========== 罚款配置操作 ==========
     async def get_fine_rates(self) -> Dict:
@@ -1192,6 +1101,7 @@ class PostgreSQLDatabase:
             self._cache.pop("push_settings", None)
 
     # ========== 统计和导出相关 ==========
+
     async def get_group_statistics(
         self, chat_id: int, target_date: Optional[date] = None
     ) -> List[Dict]:
@@ -1858,5 +1768,3 @@ class PostgreSQLDatabase:
 
 # 全局数据库实例
 db = PostgreSQLDatabase()
-
-
