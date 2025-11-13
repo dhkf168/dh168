@@ -150,8 +150,8 @@ class Config:
     }
 
     # 时间配置
-    DAILY_RESET_HOUR = 0
-    DAILY_RESET_MINUTE = 0
+    DAILY_RESET_HOUR = 10
+    DAILY_RESET_MINUTE = 10
 
     # 异步任务配置
     ASYNC_TASK_CONFIG = {
@@ -386,3 +386,4 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
+
