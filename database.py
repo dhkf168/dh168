@@ -45,8 +45,15 @@ class PostgreSQLDatabase:
                 )
                 await self._initialize_impl()
                 logger.info("✅ PostgreSQL 数据库初始化完成")
+
+                # 🆕 设置时区应该在初始化成功后
+                async with self.pool.acquire() as conn:
+                    await conn.execute("SET timezone = 'Asia/Shanghai'")
+                    logger.info("✅ 数据库会话时区已设置为 Asia/Shanghai")
+
                 self._initialized = True
                 return
+
             except Exception as e:
                 logger.warning(f"⚠️ 数据库初始化第 {attempt + 1} 次失败: {e}")
                 if attempt == max_retries - 1:
@@ -682,7 +689,7 @@ class PostgreSQLDatabase:
         self, chat_id: int, user_id: int, target_date: date | None = None
     ):
         """
-        ✅ 修复版：真正清除用户每日数据但保留月度统计
+        ✅ 修复版：真正清除用户每日数据但保留月度统计，并自动结束跨天活动
         """
         try:
             # 验证和设置目标日期
@@ -697,6 +704,11 @@ class PostgreSQLDatabase:
             user_before = await self.get_user(chat_id, user_id)
             activities_before = await self.get_user_all_activities(chat_id, user_id)
 
+            # 🆕 记录跨天活动信息
+            cross_day_activity = None
+            cross_day_duration = 0
+            cross_day_fine = 0
+
             # 计算新的日期
             new_date = target_date
             if target_date < self.get_beijing_date():
@@ -704,6 +716,121 @@ class PostgreSQLDatabase:
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
+                    # 🆕 如果有进行中的活动，先记录到月度统计
+                    if user_before and user_before.get("current_activity"):
+                        current_activity = user_before["current_activity"]
+                        start_time_str = user_before.get("activity_start_time")
+
+                        if start_time_str:
+                            try:
+                                start_time = datetime.fromisoformat(start_time_str)
+                                now = self.get_beijing_time()
+                                elapsed = int((now - start_time).total_seconds())
+
+                                # 🆕 计算超时和罚款
+                                time_limit = await self.get_activity_time_limit(
+                                    current_activity
+                                )
+                                time_limit_seconds = time_limit * 60
+                                is_overtime = elapsed > time_limit_seconds
+                                overtime_seconds = max(0, elapsed - time_limit_seconds)
+                                overtime_minutes = overtime_seconds / 60
+
+                                fine_amount = 0
+                                if is_overtime and overtime_seconds > 0:
+                                    # 🆕 计算罚款金额
+                                    fine_rates = await self.get_fine_rates_for_activity(
+                                        current_activity
+                                    )
+                                    if fine_rates:
+                                        # 转换键为整数并排序
+                                        segments = []
+                                        for time_key in fine_rates.keys():
+                                            try:
+                                                if (
+                                                    isinstance(time_key, str)
+                                                    and "min" in time_key.lower()
+                                                ):
+                                                    time_value = int(
+                                                        time_key.lower()
+                                                        .replace("min", "")
+                                                        .strip()
+                                                    )
+                                                else:
+                                                    time_value = int(time_key)
+                                                segments.append(time_value)
+                                            except (ValueError, TypeError):
+                                                continue
+
+                                        segments.sort()
+
+                                        for segment in segments:
+                                            if overtime_minutes <= segment:
+                                                original_key = str(segment)
+                                                if original_key not in fine_rates:
+                                                    original_key = f"{segment}min"
+                                                fine_amount = fine_rates.get(
+                                                    original_key, 0
+                                                )
+                                                break
+
+                                        if fine_amount == 0 and segments:
+                                            max_segment = segments[-1]
+                                            original_key = str(max_segment)
+                                            if original_key not in fine_rates:
+                                                original_key = f"{max_segment}min"
+                                            fine_amount = fine_rates.get(
+                                                original_key, 0
+                                            )
+
+                                # 记录跨天活动信息用于日志
+                                cross_day_activity = current_activity
+                                cross_day_duration = elapsed
+                                cross_day_fine = fine_amount
+
+                                # 计算活动开始的月份（用于月度统计）
+                                activity_start_month = start_time.date().replace(day=1)
+
+                                # 🆕 将跨天活动记录到月度统计
+                                await conn.execute(
+                                    """
+                                    INSERT INTO monthly_statistics 
+                                    (chat_id, user_id, statistic_date, activity_name, activity_count, accumulated_time)
+                                    VALUES ($1, $2, $3, $4, 1, $5)
+                                    ON CONFLICT (chat_id, user_id, statistic_date, activity_name) 
+                                    DO UPDATE SET 
+                                        activity_count = monthly_statistics.activity_count + 1,
+                                        accumulated_time = monthly_statistics.accumulated_time + EXCLUDED.accumulated_time,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    """,
+                                    chat_id,
+                                    user_id,
+                                    activity_start_month,
+                                    current_activity,
+                                    elapsed,
+                                )
+
+                                # 🆕 如果有罚款，更新用户罚款总额（在月度统计中）
+                                if fine_amount > 0:
+                                    await conn.execute(
+                                        """
+                                        UPDATE users SET total_fines = total_fines + $1 
+                                        WHERE chat_id = $2 AND user_id = $3
+                                        """,
+                                        fine_amount,
+                                        chat_id,
+                                        user_id,
+                                    )
+
+                                logger.debug(
+                                    f"📅 跨天活动记录到月度统计: 用户{user_id} 活动{current_activity} "
+                                    f"时长{elapsed}秒 罚款{fine_amount}元 月份{activity_start_month}"
+                                )
+
+                            except Exception as e:
+                                logger.error(f"❌ 记录跨天活动到月度统计失败: {e}")
+                                # 不抛出异常，继续执行重置逻辑
+
                     # 🆕 关键修改：使用 DELETE 真正清除记录
                     activities_deleted = await conn.execute(
                         """
@@ -723,7 +850,6 @@ class PostgreSQLDatabase:
                             total_accumulated_time = 0,
                             total_overtime_time = 0,
                             overtime_count = 0,
-                            total_fines = 0,
                             current_activity = NULL,
                             activity_start_time = NULL,
                             last_updated = $3,  
@@ -732,7 +858,6 @@ class PostgreSQLDatabase:
                         AND (
                             total_activity_count > 0 
                             OR total_accumulated_time > 0 
-                            OR total_fines > 0
                             OR overtime_count > 0
                             OR current_activity IS NOT NULL
                         )
@@ -772,12 +897,25 @@ class PostgreSQLDatabase:
                     except (ValueError, IndexError):
                         updated_count = 0
 
-            logger.info(
+            # 🆕 构建日志信息，包含跨天活动信息
+            log_message = (
                 f"✅ 完整数据清除完成（保留月度统计）: 用户 {user_id} (群组 {chat_id})\n"
                 f"   📅 清除日期: {target_date} → {new_date}\n"
                 f"   🗑️ 删除活动记录: {deleted_count} 条\n"
                 f"   🔄 更新用户记录: {updated_count} 条\n"
                 f"   💾 月度统计: 已保留（不受清除影响）\n"
+            )
+
+            if cross_day_activity:
+                duration_formatted = self.format_seconds_to_hms(cross_day_duration)
+                log_message += (
+                    f"   🌙 跨天活动记录: {cross_day_activity} ({duration_formatted})"
+                )
+                if cross_day_fine > 0:
+                    log_message += f" 💰罚款{cross_day_fine}元"
+                log_message += " → 月度统计\n"
+
+            log_message += (
                 f"   📊 清除前状态:\n"
                 f"       - 活动次数: {user_before.get('total_activity_count', 0) if user_before else 0}\n"
                 f"       - 累计时长: {user_before.get('total_accumulated_time', 0) if user_before else 0}秒\n"
@@ -787,6 +925,7 @@ class PostgreSQLDatabase:
                 f"       - 活动记录: {len(activities_before)} 种活动"
             )
 
+            logger.info(log_message)
             return True
 
         except Exception as e:
@@ -2068,6 +2207,91 @@ class PostgreSQLDatabase:
             return f"{hours}时{minutes}分{secs}秒"
         else:
             return f"{minutes}分{secs}秒"
+
+    async def init_activity_limit_table(self):
+        """初始化活动人数限制表"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_user_limits (
+                    activity_name TEXT PRIMARY KEY,
+                    max_users INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+    async def set_activity_user_limit(self, activity: str, max_users: int):
+        """设置活动人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO activity_user_limits (activity_name, max_users)
+                VALUES ($1, $2)
+                ON CONFLICT (activity_name)
+                DO UPDATE SET 
+                    max_users = EXCLUDED.max_users,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                activity,
+                max_users,
+            )
+
+        # 清理缓存
+        self._cache.pop(f"activity_limit:{activity}", None)
+        logger.info(f"✅ 设置活动人数限制: {activity} -> {max_users}人")
+
+    async def get_activity_user_limit(self, activity: str) -> int:
+        """获取活动人数限制"""
+        cache_key = f"activity_limit:{activity}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT max_users FROM activity_user_limits WHERE activity_name = $1",
+                activity,
+            )
+            limit = row["max_users"] if row else 0
+            self._set_cached(cache_key, limit, 60)
+            return limit
+
+    async def get_current_activity_users(self, chat_id: int, activity: str) -> int:
+        """获取当前正在进行指定活动的用户数量"""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM users 
+                WHERE chat_id = $1 AND current_activity = $2
+            """,
+                chat_id,
+                activity,
+            )
+            return count or 0
+
+    async def remove_activity_user_limit(self, activity: str):
+        """移除活动人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM activity_user_limits WHERE activity_name = $1", activity
+            )
+
+        self._cache.pop(f"activity_limit:{activity}", None)
+        logger.info(f"🗑️ 已移除活动人数限制: {activity}")
+
+    async def get_all_activity_limits(self) -> Dict[str, int]:
+        """获取所有活动的人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT activity_name, max_users FROM activity_user_limits"
+            )
+            return {row["activity_name"]: row["max_users"] for row in rows}
 
 
 # 全局数据库实例
