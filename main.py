@@ -150,6 +150,21 @@ class UserLockManager:
             "last_cleanup": self._last_cleanup,
         }
 
+    async def cancel_all_timers(self):
+        """取消所有定时器 - 添加这个缺失的方法"""
+        keys = list(self._timers.keys())
+        cancelled_count = 0
+
+        for key in keys:
+            try:
+                await self.cancel_timer(key)
+                cancelled_count += 1
+            except Exception as e:
+                logger.error(f"取消定时器 {key} 失败: {e}")
+
+        logger.info(f"✅ 已取消所有定时器: {cancelled_count}/{len(keys)} 个")
+        return cancelled_count
+
 
 # 全局用户锁管理器实例
 user_lock_manager = UserLockManager()
@@ -3712,50 +3727,58 @@ async def handle_admin_panel_button(message: types.Message):
 
     admin_text = (
         "👑 管理员面板\n\n"
-        "可用命令：\n"
+        "📢 频道与推送管理：\n"
         "• /setchannel <频道ID> - 绑定提醒频道\n"
         "• /setgroup <群组ID> - 绑定通知群组\n"
         "• /unbindchannel - 解除绑定频道\n"
         "• /unbindgroup - 解除绑定通知群组\n"
         "• /setpush <channel|group|admin> <on|off> - 设置推送开关\n"
         "• /showpush - 显示推送设置状态\n"
-        "• \n"
+        "• /testpush - 测试推送功能\n\n"
+        "🎯 活动管理：\n"
         "• /addactivity <活动名> <次数> <分钟> - 添加或修改活动\n"
         "• /delactivity <活动名> - 删除活动\n"
-        "• \n"
-        "• /setworktime 9:00 18:00 - 设置上下班时间\n"
-        "• /delwork - 基本移除，保留历史记录\n"
-        "• /delwork_clear - 移除并清除所有记录\n"
-        "• /workstatus - 查看当前上下班功能状态\n"
-        "• /worktime  - 查看当前群组工作时间设置\n"
-        "• /reset_work 用户ID - 可以重置用户记录\n"
-        "• /resetworktime - 重置为默认上下班时间\n"
-        "• \n"
+        "• /actnum <活动名> <人数> - 设置活动人数限制\n"
+        "• /actstatus - 查看活动人数状态\n"
+        "• /actlist - 查看所有活动人数限制\n"
+        "• /refresh_keyboard - 强制刷新键盘\n\n"
+        "🕒 上下班管理：\n"
+        "• /setworktime <上班时间> <下班时间> - 设置上下班时间\n"
+        "• /worktime - 查看当前工作时间设置\n"
+        "• /resetworktime - 重置为默认时间\n"
+        "• /delwork - 移除功能(保留记录)\n"
+        "• /delwork_clear - 移除功能并清除记录\n"
+        "• /workstatus - 查看功能状态\n"
+        "• /workcheck - 查看个人状态\n"
+        "• /workrecord - 查看个人记录\n"
+        "• /reset_work <用户ID> - 重置用户记录\n\n"
+        "⚙️ 系统设置：\n"
+        "• /setresettime <小时> <分钟> - 设置每日重置时间\n"
+        "• /setworkfine <类型> <分钟1> <金额1> [分钟2 金额2...] - 设置上下班罚款\n"
+        "• /setfine <活动名> <时间段> <金额> - 设置活动罚款\n"
+        "• /setfines_all <t1> <f1> [t2 f2...] - 统一设置分段罚款\n"
+        "• /showsettings - 查看当前设置\n"
+        "• /reset_status - 查看重置状态\n\n"
+        "📊 数据管理：\n"
         "• /set <用户ID> <活动> <分钟> - 设置用户时间\n"
         "• /reset <用户ID> - 重置用户数据\n"
-        "• \n"
-        "• /setresettime <小时> <分钟> - 设置每日重置时间\n"
-        "• /setworkfine <work_start|work_end> <时间段> <金额> - 设置上下班罚款\n"
-        "• \n"
-        "• /setfine <活动名> <时间段> <金额> - 设置活动罚款费率\n"
-        "• /setfines_all <t1> <f1> [<t2> <f2> ...] - 为所有活动统一设置分段罚款\n"
-        "• \n"
-        "• /showsettings - 查看当前群设置\n"
-        "• /reset_status - 查看重置状态\n"
-        "• \n"
+        "• /export - 导出当前数据\n"
         "• /exportmonthly - 导出月度数据\n"
-        "• /exportmonthly 2024 1 - 导出指定年月数据\n"
-        "• /monthlyreport - 生成最近一个月报告\n"
-        "• /monthlyreport <年> <月> - 生成指定年月报告\n"
-        "• /export - 导出数据\n\n"
-        "• /cleanup_monthly - 清理月度统计数据\n"
-        "• /cleanup_monthly 2024 1 - 清理指定年月数据\n"
-        "• /monthly_stats_status - 查看月度统计状态\n\n"
-        "• /cleanup_inactive - 清理user与user_activities默认30天\n\n"
-        "• /performance 查看性能\n"
-        "• /refresh_keyboard - 强制刷新键盘显示新活动\n"
-        "• /debug_work - 调试上下班功能状态\n"
-        "• \n"
+        "• /exportmonthly <年> <月> - 导出指定年月\n"
+        "• /monthlyreport - 生成月度报告\n"
+        "• /monthlyreport <年> <月> - 生成指定报告\n\n"
+        "🧹 维护工具：\n"
+        "• /cleanup_monthly - 清理月度数据\n"
+        "• /cleanup_monthly <年> <月> - 清理指定月份\n"
+        "• /cleanup_monthly all - 清理所有数据\n"
+        "• /monthly_stats_status - 查看统计状态\n"
+        "• /cleanup_inactive [天数] - 清理未活动用户\n\n"
+        "🔧 系统监控：\n"
+        "• /performance - 查看性能\n"
+        "• /debug_work - 调试上下班功能\n"
+        "• /menu - 返回主菜单\n"
+        "• /help - 查看详细帮助\n\n"
+        "💡 提示：所有时间均为北京时间，参数用空格分隔"
     )
     await message.answer(admin_text, reply_markup=get_admin_keyboard())
 
@@ -5438,13 +5461,6 @@ async def on_startup():
 async def on_shutdown():
     """关闭时执行 - 优化版本"""
     logger.info("🛑 机器人正在关闭...")
-
-    async def cancel_all_timers(self):
-        """取消所有定时器"""
-        keys = list(self._timers.keys())
-        for key in keys:
-            await self.cancel_timer(key)
-        logger.info(f"✅ 已取消所有定时器: {len(keys)} 个")
 
     await timer_manager.cancel_all_timers()
 
