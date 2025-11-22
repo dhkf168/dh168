@@ -17,12 +17,12 @@ class Config:
 
     # === Bot 基础配置 ===
     # Telegram Bot Token，从环境变量获取，默认使用测试token
-    TOKEN = os.getenv("BOT_TOKEN", "")
+    TOKEN = os.getenv("BOT_TOKEN", "8301902909:AAG9FVqGgvntWNYNgbIrYROXrfFMlM0PRkA")
 
     # === 数据库配置 ===
     # 数据库连接URL，支持PostgreSQL和SQLite
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", ""
+        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
     )
 
     # === 性能优化配置 ===
@@ -339,6 +339,15 @@ except ValueError as e:
 except Exception as e:
     print(f"❌ 配置验证过程中出现未知错误: {e}")
     exit(1)
+
+
+# 🆕 在类定义后添加时区参数 - 使用 Config.DATABASE_URL
+if Config.DATABASE_URL and "timezone=Asia/Shanghai" not in Config.DATABASE_URL:
+    if "?" in Config.DATABASE_URL:
+        Config.DATABASE_URL += "&timezone=Asia/Shanghai"
+    else:
+        Config.DATABASE_URL += "?timezone=Asia/Shanghai"
+    print(f"✅ 数据库URL已添加时区参数: {Config.DATABASE_URL}")
 
 
 # === 环境工具类 ===
