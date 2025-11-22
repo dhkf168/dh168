@@ -17,12 +17,12 @@ class Config:
 
     # === Bot 基础配置 ===
     # Telegram Bot Token，从环境变量获取，默认使用测试token
-    TOKEN = os.getenv("BOT_TOKEN", "8301902909:AAG9FVqGgvntWNYNgbIrYROXrfFMlM0PRkA")
+    TOKEN = os.getenv("BOT_TOKEN", "")
 
     # === 数据库配置 ===
     # 数据库连接URL，支持PostgreSQL和SQLite
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", "postgresql://postgres:hc456456@localhost:5432/mydata"
+        "DATABASE_URL", ""
     )
 
     # === 性能优化配置 ===
@@ -451,3 +451,4 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
+
