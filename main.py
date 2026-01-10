@@ -4890,14 +4890,18 @@ async def auto_daily_export_task():
         await asyncio.sleep(sleep_time)
 
 
+
+last_reset_record = {} 
+
 async def daily_reset_task():
     """
-    每日自动重置任务（重置 + 延迟导出昨日数据）- 修复版
+    每日自动重置任务 - 终极稳定版
     """
     while True:
         now = get_beijing_time()
-        logger.info(f"🔄 重置任务检查，当前时间: {now}")
-
+        # 将当前日期转为字符串，用于标记
+        today_str = now.strftime("%Y-%m-%d") 
+        
         try:
             all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=15)
         except Exception as e:
@@ -4907,47 +4911,48 @@ async def daily_reset_task():
 
         for chat_id in all_groups:
             try:
-                group_data = await asyncio.wait_for(
-                    db.get_group_cached(chat_id), timeout=10
-                )
-                if not group_data:
+                # 检查此群组今天是否已经重置过了
+                if last_reset_record.get(chat_id) == today_str:
                     continue
+
+                group_data = await db.get_group_cached(chat_id)
+                if not group_data: continue
 
                 reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
                 reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # 到达重置时间
+                # 判断时间
                 if now.hour == reset_hour and now.minute == reset_minute:
-                    logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id} 的数据...")
+                    # 💡 标记已重置，防止同一分钟重复执行
+                    last_reset_record[chat_id] = today_str 
+                    
+                    logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id}...")
 
-                    # 🆕 关键修复：计算昨天的日期
-                    yesterday = now - timedelta(days=1)
+                    # 这里的计算逻辑使用你提供的“业务日期”方案，非常棒
+                    business_today = await db.get_business_date(chat_id)
+                    reset_target_date = business_today - timedelta(days=1)
 
-                    # 执行每日数据重置（带用户锁防并发）
+                    # 💡 优化：对于成员很多的群组，使用 asyncio.gather 并行重置，提高效率
                     group_members = await db.get_group_members(chat_id)
-                    for user_data in group_members:
-                        user_lock = get_user_lock(chat_id, user_data["user_id"])
+                    
+                    # 定义一个内部重置函数，方便加锁执行
+                    async def reset_single_user(uid):
+                        user_lock = get_user_lock(chat_id, uid)
                         async with user_lock:
-                            # 🆕 关键修复：传递昨天的日期
-                            await db.reset_user_daily_data(
-                                chat_id,
-                                user_data["user_id"],
-                                yesterday.date(),  # 🆕 传递昨天的日期
-                            )
+                            await db.reset_user_daily_data(chat_id, uid, reset_target_date)
 
-                    logger.info(f"✅ 群组 {chat_id} 数据重置完成")
+                    # 执行重置（建议控制并发数，防止数据库压力过大）
+                    tasks = [reset_single_user(u["user_id"]) for u in group_members]
+                    await asyncio.gather(*tasks)
 
-                    # 启动延迟导出任务（默认30分钟）
+                    logger.info(f"✅ 群组 {chat_id} 重置完成，目标周期: {reset_target_date}")
                     asyncio.create_task(delayed_export(chat_id, 30))
 
-            except asyncio.TimeoutError:
-                logger.warning(f"⏰ 群组 {chat_id} 重置或查询超时，跳过。")
             except Exception as e:
-                logger.error(f"❌ 群组 {chat_id} 重置失败: {e}")
+                logger.error(f"❌ 群组 {chat_id} 处理出错: {e}")
 
-        # 每分钟检查一次
+        # 保持 60 秒检查一次
         await asyncio.sleep(60)
-
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):
     """
