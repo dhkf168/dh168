@@ -248,7 +248,6 @@ class PostgreSQLDatabase:
                     activity_name TEXT,
                     activity_count INTEGER DEFAULT 0,
                     accumulated_time INTEGER DEFAULT 0,
-                    total_fines_accumulated INTEGER DEFAULT 0,
                     work_days INTEGER DEFAULT 0,      -- 新增：工作天数
                     work_hours INTEGER DEFAULT 0,     -- 新增：工作时长（秒）
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -260,9 +259,6 @@ class PostgreSQLDatabase:
 
             for table_sql in tables:
                 await conn.execute(table_sql)
-
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_chat_user ON users(chat_id, user_id)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_activities_date ON user_activities(activity_date)")
 
             logger.info("✅ 数据库表创建完成")
 
@@ -788,187 +784,252 @@ class PostgreSQLDatabase:
     async def reset_user_daily_data(
         self, chat_id: int, user_id: int, target_date: date | None = None
     ):
-      
+        """
+        ✅ 修复版：真正清除用户每日数据但保留月度统计，并自动结束跨天活动
+        """
         try:
-            # ========= 1️⃣ 业务时间 =========
-            current_business_date = await self.get_business_date(chat_id)
-            settings = await self.get_group_settings(chat_id)
-            reset_hour = settings.get("reset_hour", 0)
+            # 验证和设置目标日期
+            if target_date is None:
+                target_date = await self.get_business_date(chat_id)
+            elif not isinstance(target_date, date):
+                raise ValueError(
+                    f"target_date必须是date类型，得到: {type(target_date)}"
+                )
 
-            # 精确业务日起点
-            cycle_start_dt = datetime.combine(
-                current_business_date,
-                datetime.min.time().replace(hour=reset_hour)
-            ).replace(tzinfo=beijing_tz)
-
-            cleanup_date = target_date or (current_business_date - timedelta(days=1))
-            now = self.get_beijing_time()
-
-            # ========= 2️⃣ 用户状态 =========
+            # 获取重置前的用户状态（用于日志）
             user_before = await self.get_user(chat_id, user_id)
-            if not user_before:
-                logger.warning(f"⚠️ reset skipped | user not found {chat_id}-{user_id}")
-                return False
+            activities_before = await self.get_user_all_activities(chat_id, user_id)
 
-            cross_day_info = None
-            is_new_cycle_activity = False
-            users_update_result = None
-            deleted_activities = None
+            # 🆕 记录跨天活动信息
+            cross_day_activity = None
+            cross_day_duration = 0
+            cross_day_fine = 0
+
+            # 计算新的日期
+            new_date = target_date
+            current_business_date = await self.get_business_date(chat_id)
+            if target_date < current_business_date:
+                new_date = current_business_date
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
+                    # 🆕 如果有进行中的活动，先记录到月度统计
+                    if user_before and user_before.get("current_activity"):
+                        current_activity = user_before["current_activity"]
+                        start_time_str = user_before.get("activity_start_time")
 
-                    # ========= 3️⃣ 罚款归档 =========
-                    total_fines_before = user_before.get("total_fines", 0)
-                    if total_fines_before > 0:
-                        month_key = current_business_date.replace(day=1)
-                        await conn.execute(
-                            """
-                            INSERT INTO monthly_statistics
-                            (chat_id, user_id, statistic_date, activity_name, fine_amount)
-                            VALUES ($1, $2, $3, '__TOTAL_FINE__', $4)
-                            ON CONFLICT (chat_id, user_id, statistic_date, activity_name)
-                            DO UPDATE SET
-                                fine_amount = monthly_statistics.fine_amount + EXCLUDED.fine_amount,
-                                updated_at = CURRENT_TIMESTAMP
-                            """,
-                            chat_id, user_id, month_key, total_fines_before
-                        )
+                        if start_time_str:
+                            try:
+                                start_time = datetime.fromisoformat(start_time_str)
+                                now = self.get_beijing_time()
+                                elapsed = int((now - start_time).total_seconds())
 
-                    # ========= 4️⃣ 跨天活动切割 =========
-                    if user_before.get("current_activity") and user_before.get("activity_start_time"):
-                        start_time = datetime.fromisoformat(user_before["activity_start_time"])
+                                # 🆕 计算超时和罚款
+                                time_limit = await self.get_activity_time_limit(
+                                    current_activity
+                                )
+                                time_limit_seconds = time_limit * 60
+                                is_overtime = elapsed > time_limit_seconds
+                                overtime_seconds = max(0, elapsed - time_limit_seconds)
+                                overtime_minutes = overtime_seconds / 60
 
-                        if start_time >= cycle_start_dt:
-                            is_new_cycle_activity = True
-                        else:
-                            # 昨日跨天活动
-                            elapsed_yesterday = int((cycle_start_dt - start_time).total_seconds())
-                            elapsed_yesterday = max(0, elapsed_yesterday)
+                                fine_amount = 0
+                                if is_overtime and overtime_seconds > 0:
+                                    # 🆕 计算罚款金额
+                                    fine_rates = await self.get_fine_rates_for_activity(
+                                        current_activity
+                                    )
+                                    if fine_rates:
+                                        # 转换键为整数并排序
+                                        segments = []
+                                        for time_key in fine_rates.keys():
+                                            try:
+                                                if (
+                                                    isinstance(time_key, str)
+                                                    and "min" in time_key.lower()
+                                                ):
+                                                    time_value = int(
+                                                        time_key.lower()
+                                                        .replace("min", "")
+                                                        .strip()
+                                                    )
+                                                else:
+                                                    time_value = int(time_key)
+                                                segments.append(time_value)
+                                            except (ValueError, TypeError):
+                                                continue
 
-                            month_key = start_time.date().replace(day=1)
-                            await conn.execute(
-                                """
-                                INSERT INTO monthly_statistics
-                                (chat_id, user_id, statistic_date, activity_name, activity_count, accumulated_time)
-                                VALUES ($1, $2, $3, $4, 1, $5)
-                                ON CONFLICT (chat_id, user_id, statistic_date, activity_name)
-                                DO UPDATE SET
-                                    accumulated_time = monthly_statistics.accumulated_time + EXCLUDED.accumulated_time,
-                                    updated_at = CURRENT_TIMESTAMP
-                                """,
-                                chat_id,
-                                user_id,
-                                month_key,
-                                user_before["current_activity"],
-                                elapsed_yesterday,
-                            )
+                                        segments.sort()
 
-                            # 修正 start_time → 今日业务起点
-                            await conn.execute(
-                                """
-                                UPDATE users
-                                SET activity_start_time = $3
-                                WHERE chat_id = $1 AND user_id = $2
-                                """,
-                                chat_id, user_id, cycle_start_dt.isoformat()
-                            )
+                                        for segment in segments:
+                                            if overtime_minutes <= segment:
+                                                original_key = str(segment)
+                                                if original_key not in fine_rates:
+                                                    original_key = f"{segment}min"
+                                                fine_amount = fine_rates.get(
+                                                    original_key, 0
+                                                )
+                                                break
 
-                            cross_day_info = (user_before["current_activity"], elapsed_yesterday)
+                                        if fine_amount == 0 and segments:
+                                            max_segment = segments[-1]
+                                            original_key = str(max_segment)
+                                            if original_key not in fine_rates:
+                                                original_key = f"{max_segment}min"
+                                            fine_amount = fine_rates.get(
+                                                original_key, 0
+                                            )
 
-                    # ========= 5️⃣ 删除昨日明细 =========
-                    deleted_activities = await conn.execute(
+                                # 记录跨天活动信息用于日志
+                                cross_day_activity = current_activity
+                                cross_day_duration = elapsed
+                                cross_day_fine = fine_amount
+
+                                # 计算活动开始的月份（用于月度统计）
+                                activity_start_month = start_time.date().replace(day=1)
+
+                                # 🆕 将跨天活动记录到月度统计
+                                await conn.execute(
+                                    """
+                                    INSERT INTO monthly_statistics 
+                                    (chat_id, user_id, statistic_date, activity_name, activity_count, accumulated_time)
+                                    VALUES ($1, $2, $3, $4, 1, $5)
+                                    ON CONFLICT (chat_id, user_id, statistic_date, activity_name) 
+                                    DO UPDATE SET 
+                                        activity_count = monthly_statistics.activity_count + 1,
+                                        accumulated_time = monthly_statistics.accumulated_time + EXCLUDED.accumulated_time,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    """,
+                                    chat_id,
+                                    user_id,
+                                    activity_start_month,
+                                    current_activity,
+                                    elapsed,
+                                )
+
+                                # 🆕 如果有罚款，更新用户罚款总额（在月度统计中）
+                                if fine_amount > 0:
+                                    await conn.execute(
+                                        """
+                                        UPDATE users SET total_fines = total_fines + $1 
+                                        WHERE chat_id = $2 AND user_id = $3
+                                        """,
+                                        fine_amount,
+                                        chat_id,
+                                        user_id,
+                                    )
+
+                                logger.debug(
+                                    f"📅 跨天活动记录到月度统计: 用户{user_id} 活动{current_activity} "
+                                    f"时长{elapsed}秒 罚款{fine_amount}元 月份{activity_start_month}"
+                                )
+
+                            except Exception as e:
+                                logger.error(f"❌ 记录跨天活动到月度统计失败: {e}")
+                                # 不抛出异常，继续执行重置逻辑
+
+                    # 🆕 关键修改：使用 DELETE 真正清除记录
+                    activities_deleted = await conn.execute(
                         """
-                        DELETE FROM user_activities
+                        DELETE FROM user_activities 
                         WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3
                         """,
-                        chat_id, user_id, cleanup_date
+                        chat_id,
+                        user_id,
+                        new_date,
                     )
 
-                    # ========= 6️⃣ 今日累计 & 用户状态 =========
-                    if user_before.get("current_activity"):
-                        today_elapsed = int((now - cycle_start_dt).total_seconds())
-                        today_elapsed = max(0, today_elapsed)
-
-                        users_update_result = await conn.execute(
-                            """
-                            UPDATE users SET
-                                total_activity_count = 1,
-                                total_accumulated_time = $4,
-                                total_fines = 0,
-                                total_overtime_time = 0,
-                                overtime_count = 0,
-                                last_updated = $3,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE chat_id = $1 AND user_id = $2
-                            """,
-                            chat_id, user_id, current_business_date, today_elapsed
+                    # 🆕 优化：条件更新，避免不必要的数据写入
+                    users_updated = await conn.execute(
+                        """
+                        UPDATE users SET
+                            total_activity_count = 0,
+                            total_accumulated_time = 0,
+                            total_fines = 0,
+                            total_overtime_time = 0,
+                            overtime_count = 0,
+                            current_activity = NULL,
+                            activity_start_time = NULL,
+                            last_updated = $3,  
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE chat_id = $1 AND user_id = $2
+                        AND (
+                            total_activity_count > 0 
+                            OR total_accumulated_time > 0
+                            OR total_fines > 0  
+                            OR overtime_count > 0
+                            OR current_activity IS NOT NULL
                         )
-                    else:
-                        # 无活动彻底清零
-                        users_update_result = await conn.execute(
-                            """
-                            UPDATE users SET
-                                current_activity = NULL,
-                                activity_start_time = NULL,
-                                total_activity_count = 0,
-                                total_accumulated_time = 0,
-                                total_fines = 0,
-                                total_overtime_time = 0,
-                                overtime_count = 0,
-                                last_updated = $3,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE chat_id = $1 AND user_id = $2
-                            """,
-                            chat_id, user_id, current_business_date
-                        )
+                        """,
+                        chat_id,
+                        user_id,
+                        new_date,
+                    )
 
-            # ========= 7️⃣ 缓存清理 =========
-            for key in (f"user:{chat_id}:{user_id}", f"group:{chat_id}", "activity_limits"):
+            # 清理相关缓存
+            cache_keys = [
+                f"user:{chat_id}:{user_id}",
+                f"group:{chat_id}",
+                "activity_limits",
+            ]
+            for key in cache_keys:
                 self._cache.pop(key, None)
                 self._cache_ttl.pop(key, None)
 
-            # ========= 8️⃣ SQL 计数安全解析 =========
+            # 🆕 修复：安全的删除计数解析
             deleted_count = 0
-            if deleted_activities:
-                parts = deleted_activities.split()
+            if activities_deleted:
+                parts = activities_deleted.split()
                 if len(parts) >= 2 and parts[0] == "DELETE":
                     try:
                         deleted_count = int(parts[-1])
                     except (ValueError, IndexError):
                         deleted_count = 0
 
+            # 🆕 修复：安全的更新计数解析
             updated_count = 0
-            if users_update_result:
-                parts = users_update_result.split()
+            if users_updated:
+                parts = users_updated.split()
                 if len(parts) >= 2 and parts[0] == "UPDATE":
                     try:
                         updated_count = int(parts[-1])
                     except (ValueError, IndexError):
                         updated_count = 0
 
-            # ========= 9️⃣ 日志 =========
+            # 🆕 构建日志信息，包含跨天活动信息
             log_message = (
                 f"✅ 完整数据清除完成（保留月度统计）: 用户 {user_id} (群组 {chat_id})\n"
-                f"   📅 清除日期: {target_date} → {cleanup_date}\n"
+                f"   📅 清除日期: {target_date} → {new_date}\n"
                 f"   🗑️ 删除活动记录: {deleted_count} 条\n"
                 f"   🔄 更新用户记录: {updated_count} 条\n"
                 f"   💾 月度统计: 已保留（不受清除影响）\n"
             )
 
-            if cross_day_info:
-                duration_formatted = self.format_seconds_to_hms(cross_day_info[1])
+            if cross_day_activity:
+                duration_formatted = self.format_seconds_to_hms(cross_day_duration)
                 log_message += (
-                    f"   🌙 跨天活动记录: {cross_day_info[0]} ({duration_formatted}) → 月度统计\n"
+                    f"   🌙 跨天活动记录: {cross_day_activity} ({duration_formatted})"
                 )
+                if cross_day_fine > 0:
+                    log_message += f" 💰罚款{cross_day_fine}元"
+                log_message += " → 月度统计\n"
+
+            log_message += (
+                f"   📊 清除前状态:\n"
+                f"       - 活动次数: {user_before.get('total_activity_count', 0) if user_before else 0}\n"
+                f"       - 累计时长: {user_before.get('total_accumulated_time', 0) if user_before else 0}秒\n"
+                f"       - 罚款金额: {user_before.get('total_fines', 0) if user_before else 0}元\n"
+                f"       - 超时次数: {user_before.get('overtime_count', 0) if user_before else 0}\n"
+                f"       - 当前活动: {user_before.get('current_activity', '无') if user_before else '无'}\n"
+                f"       - 活动记录: {len(activities_before)} 种活动"
+            )
 
             logger.info(log_message)
             return True
 
         except Exception as e:
-            logger.error(f"❌ 清除用户数据失败 {chat_id}-{user_id}: {e}", exc_info=True)
+            logger.error(f"❌ 清除用户数据失败 {chat_id}-{user_id}: {e}")
             return False
-
 
     async def update_user_last_updated(
         self, chat_id: int, user_id: int, date_obj: date
