@@ -3924,7 +3924,7 @@ async def handle_admin_panel_button(message: types.Message):
         "• /help - 查看详细帮助\n\n"
         "💡 提示：所有时间均为北京时间，参数用空格分隔"
     )
-    await safe_reply(admin_text, reply_markup=get_admin_keyboard())
+    await safe_reply(message,admin_text, reply_markup=get_admin_keyboard())
 
 
 # 🆕 新增：动态活动按钮处理器
@@ -4093,6 +4093,7 @@ async def show_history(message: types.Message):
             text += "暂无记录，请先进行打卡活动"
 
         await safe_reply(
+            message,
             text,
             reply_markup=await get_main_keyboard(
                 chat_id=chat_id, show_admin=await is_admin(uid)
@@ -4212,6 +4213,7 @@ async def show_rank(message: types.Message):
         )
 
     await safe_reply(
+        message,
         rank_text,
         reply_markup=await get_main_keyboard(chat_id, await is_admin(uid)),
         parse_mode="HTML",
