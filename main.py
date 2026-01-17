@@ -1289,45 +1289,55 @@ async def cmd_help(message: types.Message):
     uid = message.from_user.id
 
     help_text = (
-        "📋 打卡机器人使用帮助\n\n"
-        "🟢 开始活动打卡：\n"
-        "• 直接输入活动名称（如：<code>吃饭</code>、<code>小厕</code>）\n"
-        "• 或使用命令：<code>/ci 活动名</code>\n"
-        "• 或点击下方活动按钮\n\n"
-        "🔴 结束活动回座：\n"
-        "• 直接输入：<code>回座</code>\n"
-        "• 或使用命令：<code>/at</code>\n"
-        "• 或点击下方 <code>✅ 回座</code> 按钮\n\n"
-        "🕒 上下班打卡：\n"
-        "• <code>/workstart</code> - 上班打卡\n"
-        "• <code>/workend</code> - 下班打卡\n"
-        "• <code>/workrecord</code> - 查看打卡记录\n"
-        "• 或点击 <code>🟢 上班</code> 和 <code>🔴 下班</code> 按钮\n\n"
-        "👑 管理员上下班设置：\n"
-        "• <code>/setworktime 09:00 18:00</code> - 设置上下班时间\n"
-        "• <code>/showworktime</code> - 显示当前设置\n"
-        "• <code>/workstatus</code> - 查看上下班功能状态\n"
-        "• <code>/delwork</code> - 移除上下班功能（保留记录）\n"
-        "• <code>/delwork clear</code> - 移除功能并清除记录\n"
-        "• <code>/resetworktime</code> - 重置为默认时间\n"
-        "📊 查看记录：\n"
-        "• 点击 <code>📊 我的记录</code> 查看个人统计\n"
-        "• 点击 <code>🏆 排行榜</code> 查看群内排名\n\n"
-        "🔧 其他命令：\n"
-        "• <code>/start</code> - 开始使用机器人\n"
-        "• <code>/menu</code> - 显示主菜单\n"
-        "• <code>/help</code> - 显示此帮助信息\n\n"
-        "📊 月度报告：\n"
-        "• <code>/monthlyreport</code> - 查看月度报告\n"
-        "• <code>/monthlyreport 2024 1</code> - 查看指定年月报告\n"
-        "• <code>/exportmonthly</code> - 导出月度数据\n"
-        "• <code>/exportmonthly 2024 1</code> - 导出指定年月数据\n\n"
-        "⏰ 注意事项：\n"
-        "• 每个活动有每日次数限制和时间限制\n"
+        "<b>┌──────────────────────────────────────────┐</b>\n"
+        "<b>│          📋 打卡机器人使用帮助            │</b>\n"
+        "<b>├──────────────────────────────────────────┤</b>\n\n"
+        
+        "<b>🟢 开始活动打卡</b>\n"
+        "├─ 直接输入活动名称\n"
+        "   <i>例如：吃饭、小厕、抽烟</i>\n"
+        "├─ 使用命令：<code>/ci 活动名</code>\n"
+        "└─ 点击下方活动按钮\n\n"
+        
+        "<b>🔴 结束活动回座</b>\n"
+        "├─ 直接输入：<code>回座</code>\n"
+        "├─ 使用命令：<code>/at</code>\n"
+        "└─ 点击下方 <code>✅ 回座</code> 按钮\n\n"
+        
+        "<b>🕒 上下班打卡</b>\n"
+        "├─ <code>/workstart</code> - 上班打卡\n"
+        "├─ <code>/workend</code> - 下班打卡\n"
+        "├─ <code>/workrecord</code> - 查看打卡记录\n"
+        "└─ 点击 <code>🟢 上班</code>/<code>🔴 下班</code> 按钮\n\n"
+        
+        "<b>📊 查看记录</b>\n"
+        "├─ 点击 <code>📊 我的记录</code> - 查看个人统计\n"
+        "├─ 点击 <code>🏆 排行榜</code> - 查看群内排名\n"
+        "├─ <code>/monthlyreport</code> - 查看月度报告\n"
+        "└─ <code>/monthlyreport 2024 1</code> - 查看指定报告\n\n"
+        
+        "<b>🔧 其他命令</b>\n"
+        "├─ <code>/start</code> - 开始使用机器人\n"
+        "├─ <code>/menu</code> - 显示主菜单\n"
+        "└─ <code>/help</code> - 显示此帮助信息\n\n"
+        
+        "<b>👑 管理员命令</b>\n"
+        "├─ <code>/setworktime 09:00 18:00</code> - 设置上下班时间\n"
+        "├─ <code>/showworktime</code> - 显示当前设置\n"
+        "├─ <code>/workstatus</code> - 查看功能状态\n"
+        "├─ <code>/delwork</code> - 移除功能（保留记录）\n"
+        "├─ <code>/delwork clear</code> - 移除并清除记录\n"
+        "├─ <code>/resetworktime</code> - 重置为默认时间\n"
+        "├─ <code>/exportmonthly</code> - 导出月度数据\n"
+        "└─ <code>/exportmonthly 2024 1</code> - 导出指定年月\n\n"
+        
+        "<b>────────────────────────────────────────────</b>\n"
+        "<b>💡 注意事项：</b>\n"
+        "• 每个活动有每日次数和时间限制\n"
         "• 超时会产生罚款\n"
         "• 活动完成后请及时回座\n"
-        "• 每日数据会在指定时间自动重置\n"
-        "• 上下班打卡需要先上班后下班"
+        "• 每日数据会自动重置\n"
+        "• 上下班打卡：先上班后下班"
     )
 
     await safe_reply(
@@ -1339,7 +1349,6 @@ async def cmd_help(message: types.Message):
         parse_mode="HTML",
         reply_to_message_id=message.message_id
     )
-
 
 # ==================== 管理员命令功能优化 ====================
 @dp.message(Command("setchannel"))
