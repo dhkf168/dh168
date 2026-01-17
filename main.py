@@ -6,6 +6,7 @@ import csv
 import sys
 import time
 import gc
+import html
 import aiofiles
 import logging
 import psutil
@@ -280,17 +281,9 @@ performance_optimizer = EnhancedPerformanceOptimizer()
 
 # ==================== 工具函数 (Utils) ====================
 async def safe_reply(event: Union[types.Message, types.CallbackQuery], text: str, **kwargs):
-    """
-    极致优化后的安全回复函数：
-    1. 增加智能引用逻辑：优先引用“指令本身”或“触发按钮的消息”
-    2. 解决 CallbackQuery 消息过旧无法引用的潜在问题
-    3. 支持解析模式等常用参数默认化
-    """
-    # 1. 统一获取 message 对象
+    # 1. 统一获取 message 对象 (保持原样)
     if isinstance(event, types.CallbackQuery):
         msg = event.message
-        # 对于回调查询，通常我们需要在回复前先 answer 以消除转圈状态
-        # 使用 suppress 忽略重复点击导致的异常
         with suppress(Exception):
             await event.answer()
     else:
@@ -299,25 +292,31 @@ async def safe_reply(event: Union[types.Message, types.CallbackQuery], text: str
     if not msg:
         return None
 
-    # 2. 智能确定引用 ID (Thread-safe & Reply-safe)
-    # 优化点：如果 msg 已经是别人的回复，我们引用 msg 本身，而不是引用 msg 正在回复的那个人
-    # 这样能保证对话流是线性的，不会因为过度回溯导致引用 ID 失效
-    target_id = msg.message_id
-    
-    # 如果该消息属于话题/论坛模式，确保包含 thread_id
+    # 2. 线程与引用设置 (保持原样)
     if msg.message_thread_id:
         kwargs.setdefault("message_thread_id", msg.message_thread_id)
 
-    # 3. 设置默认解析模式（可选，方便写 HTML/Markdown）
+    # 3. 设置默认解析模式
     kwargs.setdefault("parse_mode", "HTML")
-    # 禁止预览（通常回复指令不需要网页预览，节省屏幕空间）
     kwargs.setdefault("disable_web_page_preview", True)
 
     try:
-        # 使用 reply 替代 answer 配合 reply_to_message_id 能获得更稳定的引用行为
+        # 第一次尝试：按 HTML 发送
         return await msg.reply(text, **kwargs)
     except Exception as e:
-        # 4. 终极回退方案：引用失败就直接发送消息
+        # 【核心修复逻辑】如果报错是 HTML 解析问题
+        if "can't parse entities" in str(e):
+            try:
+                # 方案 A：尝试对文本进行全转义后再发
+                # 这会将 "<频道id>" 变成 "&lt;频道id&gt;"，Telegram 就能正常显示文本了
+                safe_text = html.escape(text, quote=False)
+                return await msg.reply(safe_text, **kwargs)
+            except Exception:
+                # 方案 B：如果转义还失败，彻底放弃 HTML 模式，按纯文本发送
+                kwargs.pop("parse_mode", None)
+                return await msg.reply(text, **kwargs)
+        
+        # 4. 其他普通错误的回退方案
         try:
             return await msg.answer(text, **kwargs)
         except Exception as final_e:
@@ -385,18 +384,18 @@ class OptimizedUserContext:
         pass
 
 
+import html # 请确保在文件顶部导入了它
+
 class MessageFormatter:
-    """消息格式化工具类 - 优化版本"""
+    """消息格式化工具类 - 彻底修复 HTML 转义版本"""
 
     @staticmethod
     def format_time(seconds: int):
         """格式化时间显示 - 包含秒级精度"""
         if seconds is None:
             return "0秒"
-
         m, s = divmod(seconds, 60)
         h, m = divmod(m, 60)
-
         if h > 0:
             return f"{h}小时{m}分{s}秒"
         elif m > 0:
@@ -405,107 +404,50 @@ class MessageFormatter:
             return f"{s}秒"
 
     @staticmethod
-    def format_time_for_csv(seconds: int):
-        """为 CSV 导出格式化时间显示 - 包含秒级精度"""
-        if seconds is None:
-            return "0分0秒"
-
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        secs = seconds % 60
-
-        if hours > 0:
-            return f"{hours}时{minutes}分{secs}秒"
-        else:
-            return f"{minutes}分{secs}秒"
-
-    @staticmethod
-    def format_minutes_to_hms(minutes: float):
-        """将分钟数格式化为小时:分钟:秒的字符串 - 修复精度问题"""
-        if minutes is None:
-            return "0小时0分0秒"
-
-        total_seconds = int(minutes * 60)
-        hours = total_seconds // 3600
-        minutes_remaining = (total_seconds % 3600) // 60
-        seconds_remaining = total_seconds % 60
-
-        if hours > 0:
-            return f"{hours}小时{minutes_remaining}分{seconds_remaining}秒"
-        elif minutes_remaining > 0:
-            return f"{minutes_remaining}分{seconds_remaining}秒"
-        else:
-            return f"{seconds_remaining}秒"
-
-    @staticmethod
     def format_user_link(user_id: int, user_name: str):
-        """格式化用户链接"""
+        """格式化用户链接 - 安全转义版本"""
         if not user_name:
             user_name = f"用户{user_id}"
-        clean_name = (
-            str(user_name)
-            .replace("<", "")
-            .replace(">", "")
-            .replace("&", "")
-            .replace('"', "")
-        )
+        
+        # 【修改点】使用 html.escape 进行标准转义，不再手动 replace
+        # 这样即使名字里有 < > & 也会被安全地转为 HTML 实体
+        clean_name = html.escape(str(user_name), quote=False)
         return f'<a href="tg://user?id={user_id}">{clean_name}</a>'
+
+    @staticmethod
+    def format_copyable_text(text: str):
+        """格式化可复制文本 - 安全转义版本"""
+        # 【修改点】必须先对内容进行转义，再套上 <code> 标签
+        # 否则如果内容是 "<频道id>"，直接套 code 会变成 <code><频道id></code>，这会导致发送失败
+        safe_text = html.escape(str(text), quote=False)
+        return f"<code>{safe_text}</code>"
 
     @staticmethod
     def create_dashed_line():
         """创建短虚线分割线"""
-        return MessageFormatter.format_copyable_text("--------------------------")
+        return "--------------------------" # 分割线不需要用 code 标签，避免过度转义
 
     @staticmethod
-    def format_copyable_text(text: str):
-        """格式化可复制文本"""
-        return f"<code>{text}</code>"
-
-    @staticmethod
-    def format_activity_message(
-        user_id: int,
-        user_name: str,
-        activity: str,
-        time_str: str,
-        count: int,
-        max_times: int,
-        time_limit: int,
-    ):
+    def format_activity_message(user_id: int, user_name: str, activity: str, time_str: str, count: int, max_times: int, time_limit: int):
         """格式化打卡消息"""
         first_line = f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}"
-
+        
+        # 所有的动态变量都通过 format_copyable_text 处理
         message = (
             f"{first_line}\n"
             f"✅ 打卡成功：{MessageFormatter.format_copyable_text(activity)} - {MessageFormatter.format_copyable_text(time_str)}\n"
             f"⚠️ 注意：这是您第 {MessageFormatter.format_copyable_text(str(count))} 次{MessageFormatter.format_copyable_text(activity)}（今日上限：{MessageFormatter.format_copyable_text(str(max_times))}次）\n"
             f"⏰ 本次活动时间限制：{MessageFormatter.format_copyable_text(str(time_limit))} 分钟"
         )
-
         if count >= max_times:
-            message += f"\n🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
-
-        message += f"\n💡提示：活动完成后请及时点击'✅ 回座'按钮"
-
+            message += f"\n🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限！"
+        message += f"\n💡 提示：活动完成后请及时点击'✅ 回座'按钮"
         return message
 
     @staticmethod
-    def format_back_message(
-        user_id: int,
-        user_name: str,
-        activity: str,
-        time_str: str,
-        elapsed_time: str,
-        total_activity_time: str,
-        total_time: str,
-        activity_counts: dict,
-        total_count: int,
-        is_overtime: bool = False,
-        overtime_seconds: int = 0,
-        fine_amount: int = 0,
-    ):
+    def format_back_message(user_id: int, user_name: str, activity: str, time_str: str, elapsed_time: str, total_activity_time: str, total_time: str, activity_counts: dict, total_count: int, is_overtime: bool = False, overtime_seconds: int = 0, fine_amount: int = 0):
         """格式化回座消息"""
         first_line = f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}"
-
         message = (
             f"{first_line}\n"
             f"✅ {MessageFormatter.format_copyable_text(time_str)} 回座打卡成功\n"
@@ -514,22 +456,17 @@ class MessageFormatter:
             f"📈 今日累计{MessageFormatter.format_copyable_text(activity)}时间：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
             f"📊 今日总计时：{MessageFormatter.format_copyable_text(total_time)}\n"
         )
-
         if is_overtime:
             overtime_time = MessageFormatter.format_time(int(overtime_seconds))
             message += f"⚠️ 警告：您本次的活动已超时！\n🚨 超时时间：{MessageFormatter.format_copyable_text(overtime_time)}\n"
             if fine_amount > 0:
                 message += f"💸 罚款：{MessageFormatter.format_copyable_text(str(fine_amount))} 元\n"
-
-        dashed_line = MessageFormatter.create_dashed_line()
-        message += f"{dashed_line}\n"
-
+        
+        message += f"{MessageFormatter.create_dashed_line()}\n"
         for act, count in activity_counts.items():
             if count > 0:
                 message += f"🔹 本日{MessageFormatter.format_copyable_text(act)}次数：{MessageFormatter.format_copyable_text(str(count))} 次\n"
-
         message += f"\n📊 今日总活动次数：{MessageFormatter.format_copyable_text(str(total_count))} 次"
-
         return message
 
 
