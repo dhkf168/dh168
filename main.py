@@ -655,8 +655,6 @@ async def reset_daily_data_if_needed(chat_id: int, uid: int):
     🎯 精确版每日数据重置 - 基于管理员设定的重置时间点
     逻辑：如果用户最后更新时间在上个重置周期之前，就重置数据
     """
-    from datetime import date, datetime, timedelta
-
     try:
         now = get_beijing_time()
 
@@ -1797,6 +1795,7 @@ async def cmd_reset(message: types.Message):
         )
 
 
+# =========  重置指令(硬重置) ==========
 @dp.message(Command("setresettime"))
 @admin_required
 @rate_limit(rate=3, per=30)
@@ -1841,6 +1840,35 @@ async def cmd_setresettime(message: types.Message):
                 chat_id=message.chat.id, show_admin=True
             ),
         )
+
+# ========= 二次重置(软重置) =========
+@dp.message(Command("soft_reset"))
+@admin_required
+@rate_limit(rate=2, per=60)
+async def cmd_soft_reset(message: types.Message):
+    """软重置群组数据"""
+    chat_id = message.chat.id
+    
+    await message.answer("🔄 正在执行软重置，请稍候...")
+    
+    try:
+        success = await db.soft_reset_group(chat_id)
+        
+        if success:
+            await message.answer(
+                f"✅ 软重置完成！\n\n"
+                f"📊 已执行的操作：\n"
+                f"• 标记现有统计为软重置状态\n"
+                f"• 清空用户活动记录\n"
+                f"• 重置用户展示字段\n\n"
+                f"💡 用户可以重新开始打卡，排行榜数据保留完整一日数据",
+                reply_markup=await get_main_keyboard(chat_id, show_admin=True)
+            )
+        else:
+            await message.answer("❌ 软重置失败，请查看日志")
+            
+    except Exception as e:
+        await message.answer(f"❌ 软重置失败: {e}")
 
 
 @dp.message(Command("setfine"))
@@ -3955,7 +3983,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（完整功能版）"""
+    """显示排行榜（完美整合版）- 兼顾历史统计与实时状态"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3967,48 +3995,44 @@ async def show_rank(message: types.Message):
         return
 
     rank_text = "🏆 今日活动排行榜\n\n"
-    today = db.get_beijing_date()
+    today = await db.get_business_date(chat_id)
     found_any_data = False
 
     async with db.pool.acquire() as conn:
         for act in activity_limits.keys():
-            # 🎯 修复：保留次数统计的完整查询
+            # 核心逻辑：历史统计从 daily_statistics 获取，实时数据从 users 获取
             rows = await conn.fetch(
                 """
-                WITH ranked_activities AS (
-                    -- 已完成的活动
+                WITH combined_rank AS (
+                    -- 1. 已结算的统计数据（包含重置前的历史）
                     SELECT 
-                        ua.user_id,
-                        COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
-                        ua.accumulated_time as total_time,
-                        ua.activity_count,
+                        ds.user_id,
+                        COALESCE(u.nickname, '用户' || ds.user_id::text) as nickname,
+                        ds.accumulated_time as total_time,
+                        ds.activity_count as total_count,
                         'completed' as status,
-                        NULL as activity_start_time,
-                        ua.accumulated_time as sort_key  -- 按累计时间排序
-                    FROM user_activities ua
-                    LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                    WHERE ua.chat_id = $1 
-                      AND ua.activity_date = $2 
-                      AND ua.activity_name = $3
-                      AND ua.accumulated_time > 0
-                    
-                    UNION
-                    
-                    -- 进行中的活动
+                        NULL::timestamp as activity_start_time,
+                        ds.accumulated_time as sort_key
+                    FROM daily_statistics ds
+                    LEFT JOIN users u ON ds.chat_id = u.chat_id AND ds.user_id = u.user_id
+                    WHERE ds.chat_id = $1 AND ds.statistic_date = $2 AND ds.activity_name = $3
+
+                    UNION ALL
+
+                    -- 2. 实时进行中的数据
                     SELECT 
                         u.user_id,
                         COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
                         0 as total_time,
-                        0 as activity_count,
+                        COALESCE(u.activity_count, 0) as total_count, -- 进行中次数也显示
                         'active' as status,
                         u.activity_start_time,
-                        -- 🎯 关键优化：进行中活动按持续时间排序
                         EXTRACT(epoch FROM (CURRENT_TIMESTAMP - u.activity_start_time::timestamp)) as sort_key
                     FROM users u
-                    WHERE u.chat_id = $1 
-                      AND u.current_activity = $3
+                    WHERE u.chat_id = $1 AND u.current_activity = $3
                 )
-                SELECT * FROM ranked_activities 
+                SELECT * FROM combined_rank 
+                WHERE sort_key > 0
                 ORDER BY sort_key DESC
                 LIMIT 5
                 """,
@@ -4024,34 +4048,32 @@ async def show_rank(message: types.Message):
                 for i, row in enumerate(rows, 1):
                     user_id = row["user_id"]
                     name = row["nickname"]
-                    time_sec = row["total_time"] or 0
                     status = row["status"]
-                    activity_count = row["activity_count"] or 0  # 🎯 修复：获取次数
 
-                    if status == "completed" and time_sec > 0:
-                        time_str = MessageFormatter.format_time(int(time_sec))
-                        # 🎯 修复：显示次数统计
-                        rank_text += f"  <code>{i}.</code> 🟢 {MessageFormatter.format_user_link(user_id, name)} - {time_str} ({activity_count}次)\n"
-                    elif status == "active":
-                        # 计算进行中活动的持续时间
-                        duration_info = ""
+                    # 已完成：时间 + 次数
+                    if status == "completed":
+                        time_str = MessageFormatter.format_time(int(row["total_time"]))
+                        count = row["total_count"] or 0
+                        rank_text += f"  <code>{i}.</code> 🟢 {MessageFormatter.format_user_link(user_id, name)} - {time_str} ({count}次)\n"
+
+                    # 进行中：实时持续时间 + 次数
+                    else:
+                        elapsed = 0
                         if row["activity_start_time"]:
-                            try:
-                                start_time = datetime.fromisoformat(
-                                    row["activity_start_time"]
-                                )
-                                now = get_beijing_time()
-                                elapsed_seconds = int(
-                                    (now - start_time).total_seconds()
-                                )
-                                duration_info = f" ({MessageFormatter.format_time(elapsed_seconds)})"
-                            except Exception:
-                                duration_info = ""
-                        # 🎯 修复：进行中也显示次数（如果有的话）
-                        count_info = (
-                            f" ({activity_count}次)" if activity_count > 0 else ""
-                        )
-                        rank_text += f"  <code>{i}.</code> 🟡 {MessageFormatter.format_user_link(user_id, name)} - 进行中{duration_info}{count_info}\n"
+                            now = get_beijing_time()
+                            start_time = row["activity_start_time"]
+
+                            if isinstance(start_time, str):
+                                start_time = datetime.fromisoformat(start_time)
+
+                            elapsed = int((now - start_time).total_seconds())
+
+                        time_str = MessageFormatter.format_time(elapsed)
+                        count = row["total_count"] or 0
+
+                        # ⚠️ 这里保留“进行中也显示次数”
+                        count_info = f" ({count}次)" if count > 0 else ""
+                        rank_text += f"  <code>{i}.</code> 🟡 {MessageFormatter.format_user_link(user_id, name)} - 进行中 ({time_str}){count_info}\n"
 
                 rank_text += "\n"
 
@@ -4443,138 +4465,172 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
         logger.error(f"❌ 月度导出优化版失败: {e}")
         return None
 
-
+# ========= 数据导出 ==========
 async def export_and_push_csv(
     chat_id: int,
+    start_datetime=None,
+    end_datetime=None,
+    target_date=None,  # 🛠️ 补回此参数以兼容自动重置任务的调用
     to_admin_if_no_group: bool = True,
     file_name: str = None,
-    target_date=None,
 ):
-    """导出群组数据为 CSV 并推送 - 支持从月度表恢复数据"""
+    """
+    导出群组数据为 CSV 并推送
+    ✅ 已对齐表结构：字段名为 created_at
+    ✅ 已对齐数据类型：statistic_date 为 DATE
+    """
     await db.init_group(chat_id)
 
-    # 规范 target_date
-    if target_date is not None and hasattr(target_date, "date"):
-        target_date = target_date.date()
+    # ==================== 🛠️ 参数兼容性处理 ====================
+    # 1. 如果传入的是 target_date，转换为 start/end 范围
+    if target_date and not start_datetime:
+        if hasattr(target_date, "date"):
+            target_date = target_date.date()
+        start_datetime = datetime.combine(target_date, datetime.min.time())
+        end_datetime = start_datetime + timedelta(days=1)
+    
+    # 2. 如果没有任何时间，默认获取当前业务日期
+    if not start_datetime:
+        biz_date = await db.get_business_date(chat_id)
+        start_datetime = datetime.combine(biz_date, datetime.min.time())
+        end_datetime = start_datetime + timedelta(days=1)
 
+    # ==================== 📄 CSV 初始化 ====================
     if not file_name:
-        if target_date is not None:
-            date_str = target_date.strftime("%Y%m%d")
-        else:
-            date_str = get_beijing_time().strftime("%Y%m%d_%H%M%S")
-        file_name = f"group_{chat_id}_statistics_{date_str}.csv"
-
-    # 🆕 关键修复：检查是否是重置后的导出（目标日期是昨天）
-    now = get_beijing_time()
-    is_reset_export = False
-    if target_date and target_date == (now - timedelta(days=1)).date():
-        is_reset_export = True
-        logger.info(f"🔄 检测到重置后导出，将从月度表恢复 {target_date} 的数据")
+        file_name = f"group_{chat_id}_stats_{start_datetime.strftime('%Y%m%d')}.csv"
 
     csv_buffer = StringIO()
     writer = csv.writer(csv_buffer)
 
     activity_limits = await db.get_activity_limits_cached()
-    headers = ["用户ID", "用户昵称"]
+
+    # 表头
+    headers = ["用户ID", "用户昵称", "重置类型"]
     for act in activity_limits.keys():
-        headers.extend([f"{act}次数", f"{act}总时长"])
-    headers.extend(
-        ["活动次数总计", "活动用时总计", "罚款总金额", "超时次数", "总超时时间"]
-    )
+        headers.extend([f"{act}次数", f"{act}时长"])
+    headers.extend([
+        "总活动次数", "总活动用时", "罚款总额", 
+        "超时次数", "总超时时间", "工作天数", "工作时长"
+    ])
     writer.writerow(headers)
 
     has_data = False
 
-    if is_reset_export:
-        # 🆕 重置后导出：从月度表获取数据
-        group_stats = await get_group_stats_from_monthly(chat_id, target_date)
-    else:
-        # 正常导出：从日常表获取数据
-        group_stats = await db.get_group_statistics(chat_id, target_date)
+    # ==================== 📊 获取数据 ====================
+    biz_date = start_datetime.date()
+    group_stats = await db.get_group_statistics(chat_id, biz_date)
 
-    # 后续代码保持不变...
+    # 🎯 内部函数：检查重置类型（已对齐字段名为 created_at）
+    async def check_user_soft_reset(user_id: int) -> str:
+        try:
+            async with db.pool.acquire() as conn:
+                # 🛠️ 修正字段名为 created_at
+                has_soft_reset = await conn.fetchval(
+                    """
+                    SELECT 1 FROM daily_statistics 
+                    WHERE chat_id=$1 AND user_id=$2 
+                    AND created_at >= $3 AND created_at < $4
+                    AND is_soft_reset = TRUE LIMIT 1
+                    """,
+                    chat_id, user_id, start_datetime, end_datetime
+                )
+                return "软重置" if has_soft_reset else "硬重置"
+        except Exception as e:
+            logger.debug(f"检查软重置状态失败: {e}")
+            return "未知"
+
+    # ==================== ✍️ 遍历写入 ====================
     for user_data in group_stats:
+        if not isinstance(user_data, dict):
+            continue
+
+        user_activities = user_data.get("activities", {})
+        if not isinstance(user_activities, dict):
+            user_activities = {}
+
         total_count = user_data.get("total_activity_count", 0)
         total_time = user_data.get("total_accumulated_time", 0)
-        if total_count > 0 or (total_time and total_time > 0):
+        
+        if total_count > 0 or total_time > 0:
             has_data = True
 
-        row = [user_data["user_id"], user_data.get("nickname", "未知用户")]
+        user_id = user_data.get("user_id")
+        reset_type = await check_user_soft_reset(user_id)
+
+        row = [
+            user_id,
+            user_data.get("nickname", "未知用户"),
+            reset_type
+        ]
+
+        # 活动细节列
         for act in activity_limits.keys():
-            activity_info = user_data.get("activities", {}).get(act, {})
-            count = activity_info.get("count", 0)
-            total_seconds = int(activity_info.get("time", 0))
-            time_str = MessageFormatter.format_time_for_csv(total_seconds)
+            info = user_activities.get(act, {})
+            if not isinstance(info, dict): info = {}
+            count = info.get("count", 0)
+            seconds = int(info.get("time", 0) or 0)
             row.append(count)
-            row.append(time_str)
+            row.append(MessageFormatter.format_time_for_csv(seconds))
 
-        total_seconds_all = int(user_data.get("total_accumulated_time", 0) or 0)
-        total_time_str = MessageFormatter.format_time_for_csv(total_seconds_all)
+        # 统计汇总列
+        total_time_str = MessageFormatter.format_time_for_csv(int(total_time or 0))
+        overtime_sec = int(user_data.get("total_overtime_time", 0) or 0)
+        work_sec = int(user_data.get("work_hours", 0) or 0)
 
-        overtime_seconds = int(user_data.get("total_overtime_time", 0) or 0)
-        overtime_str = MessageFormatter.format_time_for_csv(overtime_seconds)
-
-        row.extend(
-            [
-                total_count,
-                total_time_str,
-                user_data.get("total_fines", 0),
-                user_data.get("overtime_count", 0),
-                overtime_str,
-            ]
-        )
+        row.extend([
+            total_count,
+            total_time_str,
+            user_data.get("total_fines", 0),
+            user_data.get("overtime_count", 0),
+            MessageFormatter.format_time_for_csv(overtime_sec),
+            user_data.get("work_days", 0),
+            MessageFormatter.format_time_for_csv(work_sec),
+        ])
         writer.writerow(row)
 
     if not has_data:
-        await bot.send_message(chat_id, "⚠️ 当前群组没有数据需要导出")
+        await bot.send_message(chat_id, "⚠️ 当前群组在统计周期内没有数据")
         return
 
+    # ==================== 📤 发送与清理 ====================
     csv_content = csv_buffer.getvalue()
     csv_buffer.close()
 
     temp_file = f"temp_{file_name}"
     try:
+        # 使用 UTF-8-SIG 确保 Excel 打开不乱码
         async with aiofiles.open(temp_file, "w", encoding="utf-8-sig") as f:
             await f.write(csv_content)
 
         chat_title = str(chat_id)
-        try:
+        with suppress(Exception):
             chat_info = await bot.get_chat(chat_id)
             chat_title = chat_info.title or chat_title
-        except:
-            pass
 
         caption = (
             f"📊 群组：<b>{chat_title}</b>\n"
-            f"📅 统计日期：<code>{(target_date.strftime('%Y-%m-%d') if target_date else get_beijing_time().strftime('%Y-%m-%d'))}</code>\n"
-            f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>"
+            f"📅 统计区间：<code>{start_datetime.strftime('%Y-%m-%d %H:%M')} ~ {end_datetime.strftime('%Y-%m-%d %H:%M')}</code>\n"
+            f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+            f"{MessageFormatter.create_dashed_line()}\n"
+            f"💾 包含用户每日活动统计（合并软/硬重置数据）"
         )
 
-        # 先把文件发回到当前 chat（可选）
-        try:
-            csv_input_file = FSInputFile(temp_file, filename=file_name)
-            await bot.send_document(
-                chat_id, csv_input_file, caption=caption, parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.warning(f"发送到当前聊天失败: {e}")
+        csv_input = FSInputFile(temp_file, filename=file_name)
+        # 发送至群组
+        await bot.send_document(chat_id, csv_input, caption=caption, parse_mode="HTML")
+        # 同步推送到管理员/频道
+        await NotificationService.send_document(chat_id, FSInputFile(temp_file, filename=file_name), caption=caption)
 
-        # 使用统一的 NotificationService 推送到绑定的频道/群组/管理员
-        await NotificationService.send_document(
-            chat_id, FSInputFile(temp_file, filename=file_name), caption=caption
-        )
-
-        logger.info(f"✅ 数据导出并推送完成: {file_name}")
+        logger.info(f"✅ 数据导出完成: {file_name}")
 
     except Exception as e:
         logger.error(f"❌ 导出过程出错: {e}")
-        await bot.send_message(chat_id, f"❌ 导出失败：{e}")
+        with suppress(Exception):
+            await bot.send_message(chat_id, f"❌ 导出失败：{e}")
     finally:
-        try:
-            if os.path.exists(temp_file):
+        if os.path.exists(temp_file):
+            with suppress(Exception):
                 os.remove(temp_file)
-        except:
-            pass
 
 
 async def export_monthly_csv(
@@ -4819,89 +4875,25 @@ async def export_data_before_reset(chat_id: int):
         logger.error(f"❌ 自动导出数据失败：{e}")
 
 
-# ==================== 自动导出与每日重置任务（最终整合版） ====================
 
 
-async def auto_daily_export_task():
-    """
-    每日重置前自动导出群组数据（重置前 1 分钟导出）
-    """
-    while True:
-        now = get_beijing_time()
-        logger.info(f"🕒 自动导出任务运行中，当前时间: {now}")
+# ==================== 每日重置任务（简单可靠版） ====================
 
-        try:
-            # 获取群组列表
-            all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=15)
-            if not all_groups:
-                logger.warning("⚠️ 未获取到任何群组，10秒后重试。")
-                await asyncio.sleep(10)
-                continue
-        except asyncio.TimeoutError:
-            logger.error("⏰ 数据库查询超时（get_all_groups），将在30秒后重试。")
-            await asyncio.sleep(30)
-            continue
-        except Exception as e:
-            logger.error(f"❌ 获取群组列表失败: {e}")
-            await asyncio.sleep(30)
-            continue
-
-        export_executed = False
-
-        for chat_id in all_groups:
-            try:
-                group_data = await asyncio.wait_for(
-                    db.get_group_cached(chat_id), timeout=10
-                )
-                if not group_data:
-                    continue
-
-                reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
-                reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
-
-                # 计算目标时间（重置前1分钟）
-                target_time = (reset_hour * 60 + reset_minute - 1) % (24 * 60)
-                now_minutes = now.hour * 60 + now.minute
-
-                if now_minutes == target_time:
-                    logger.info(f"📤 到达重置前导出时间，导出群组 {chat_id} 数据中...")
-
-                    file_name = (
-                        f"group_{chat_id}_pre_reset_{now.strftime('%Y%m%d')}.csv"
-                    )
-                    await asyncio.wait_for(
-                        export_and_push_csv(
-                            chat_id, to_admin_if_no_group=True, file_name=file_name
-                        ),
-                        timeout=30,
-                    )
-
-                    logger.info(f"✅ 群组 {chat_id} 导出成功（重置前）")
-                    export_executed = True
-
-            except asyncio.TimeoutError:
-                logger.warning(f"⏰ 群组 {chat_id} 导出或查询超时，跳过此群。")
-            except Exception as e:
-                logger.error(f"❌ 自动导出失败，群组 {chat_id}: {e}")
-
-        # 导出完成后稍长休眠，未导出则快速循环
-        sleep_time = 120 if export_executed else 60
-        logger.info(f"🕐 导出循环结束，休眠 {sleep_time}s ...")
-        await asyncio.sleep(sleep_time)
-
-
-
-last_reset_record = {} 
+last_reset_record = {}  # 记录群组最后一次重置日期，防止重复
 
 async def daily_reset_task():
     """
-    每日自动重置任务 - 终极稳定版
+    每日自动重置任务 - 稳定终极版（带微调优化）
+    需求满足：
+    ✅ 每日重置前导出数据
+    ✅ 时间窗口判断（防抖动）
+    ✅ 错误处理和恢复机制
+    ✅ 并发控制和性能优化
     """
     while True:
         now = get_beijing_time()
-        # 将当前日期转为字符串，用于标记
-        today_str = now.strftime("%Y-%m-%d") 
-        
+        today_str = now.strftime("%Y-%m-%d")
+
         try:
             all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=15)
         except Exception as e:
@@ -4911,47 +4903,155 @@ async def daily_reset_task():
 
         for chat_id in all_groups:
             try:
-                # 检查此群组今天是否已经重置过了
+                # 🚫 防止当天重复处理
                 if last_reset_record.get(chat_id) == today_str:
                     continue
 
                 group_data = await db.get_group_cached(chat_id)
-                if not group_data: continue
+                if not group_data:
+                    continue
 
                 reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
                 reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # 判断时间
-                if now.hour == reset_hour and now.minute == reset_minute:
-                    # 💡 标记已重置，防止同一分钟重复执行
-                    last_reset_record[chat_id] = today_str 
+                # ==================== ✅ 稳定时间窗口判断 ====================
+                reset_time_today = now.replace(
+                    hour=reset_hour,
+                    minute=reset_minute,
+                    second=0,
+                    microsecond=0
+                )
+
+                # 给 1 分钟容错窗口（防 asyncio / CPU 抖动）
+                reset_window_start = reset_time_today
+                reset_window_end = reset_time_today + timedelta(minutes=1)
+
+                if not (reset_window_start <= now < reset_window_end):
+                    continue
+                # ===========================================================
+
+                logger.info(f"⏰ 到达重置窗口，开始处理群组 {chat_id}...")
+
+                # 🏷️ 先标记，防止窗口内重复执行
+                last_reset_record[chat_id] = today_str
+
+                # ==================== 1️⃣ 计算导出日期（重置前数据） ====================
+                business_today = await db.get_business_date(chat_id)
+                target_export_date = business_today - timedelta(days=1)
+
+                # ==================== 2️⃣ 重置前导出（带超时保护） ====================
+                logger.info(f"📤 正在导出重置前数据：群组 {chat_id}，日期 {target_export_date}")
+
+                export_success = False
+                try:
+                    file_name = f"group_{chat_id}_reset_backup_{now.strftime('%Y%m%d')}.csv"
+                    await asyncio.wait_for(
+                        export_and_push_csv(
+                            chat_id,
+                            to_admin_if_no_group=True,
+                            file_name=file_name,
+                            target_date=target_export_date
+                        ),
+                        timeout=30  # 30秒超时
+                    )
+                    export_success = True
+                    logger.info(f"✅ 群组 {chat_id} 重置前数据导出完成")
                     
-                    logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id}...")
-
-                    # 这里的计算逻辑使用你提供的“业务日期”方案，非常棒
-                    business_today = await db.get_business_date(chat_id)
-                    reset_target_date = business_today - timedelta(days=1)
-
-                    # 💡 优化：对于成员很多的群组，使用 asyncio.gather 并行重置，提高效率
-                    group_members = await db.get_group_members(chat_id)
+                except asyncio.TimeoutError:
+                    logger.error(f"⏰ 群组 {chat_id} 导出超时（30秒）")
+                    # 通知管理员
+                    for admin_id in Config.ADMINS:
+                        with suppress(Exception):
+                            await bot.send_message(
+                                admin_id,
+                                f"⏰ 群组 {chat_id} 重置前导出超时"
+                            )
                     
-                    # 定义一个内部重置函数，方便加锁执行
-                    async def reset_single_user(uid):
-                        user_lock = get_user_lock(chat_id, uid)
-                        async with user_lock:
-                            await db.reset_user_daily_data(chat_id, uid, reset_target_date)
+                except Exception as export_error:
+                    logger.error(f"❌ 群组 {chat_id} 重置前导出失败: {export_error}")
+                    for admin_id in Config.ADMINS:
+                        with suppress(Exception):
+                            await bot.send_message(
+                                admin_id,
+                                f"⚠️ 群组 {chat_id} 重置前自动导出失败，请检查日志"
+                            )
 
-                    # 执行重置（建议控制并发数，防止数据库压力过大）
-                    tasks = [reset_single_user(u["user_id"]) for u in group_members]
-                    await asyncio.gather(*tasks)
+                # ==================== 3️⃣ 执行重置（分批并发） ====================
+                logger.info(f"🗑️ 正在重置群组 {chat_id} 数据...")
 
-                    logger.info(f"✅ 群组 {chat_id} 重置完成，目标周期: {reset_target_date}")
-                    asyncio.create_task(delayed_export(chat_id, 30))
+                group_members = await db.get_group_members(chat_id)
+                
+                async def reset_single_user(uid):
+                    user_lock = get_user_lock(chat_id, uid)
+                    async with user_lock:
+                        await db.reset_user_daily_data(
+                            chat_id,
+                            uid,
+                            target_export_date
+                        )
+
+                # 分批处理，防止数据库压力过大
+                batch_size = 10
+                processed_count = 0
+                
+                for i in range(0, len(group_members), batch_size):
+                    batch = group_members[i:i + batch_size]
+                    
+                    tasks = [
+                        reset_single_user(u["user_id"])
+                        for u in batch
+                    ]
+                    
+                    # 执行当前批次
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # 统计成功/失败
+                    for result in results:
+                        if isinstance(result, Exception):
+                            logger.warning(f"⚠️ 用户重置失败: {result}")
+                        else:
+                            processed_count += 1
+                    
+                    # 批次间短暂休息
+                    if i + batch_size < len(group_members):
+                        await asyncio.sleep(0.5)
+
+                logger.info(f"✅ 群组 {chat_id} 重置完成，共处理 {processed_count}/{len(group_members)} 个用户")
+
+                # ==================== 4️⃣ 清理缓存 ====================
+                try:
+                    # 清理用户缓存
+                    for user_data in group_members:
+                        user_id = user_data["user_id"]
+                        db._cache.pop(f"user:{chat_id}:{user_id}", None)
+                    
+                    # 清理群组缓存
+                    db._cache.pop(f"group:{chat_id}", None)
+                    
+                    logger.info(f"🧹 群组 {chat_id} 缓存清理完成")
+                except Exception as cache_error:
+                    logger.warning(f"⚠️ 缓存清理失败（不影响功能）: {cache_error}")
+
+                # ==================== 5️⃣ 发送重置通知（可选） ====================
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        f"🔄 每日数据重置已完成\n"
+                        f"📅 重置时间: {now.strftime('%Y-%m-%d %H:%M')}\n"
+                        f"📊 昨日数据已备份\n"
+                        f"🎯 新的一天开始啦！"
+                    )
+                    logger.info(f"📢 群组 {chat_id} 重置通知已发送")
+                except Exception as notify_error:
+                    logger.warning(f"⚠️ 重置通知发送失败: {notify_error}")
+
+                # 每组处理完成后短暂暂停
+                await asyncio.sleep(2)
 
             except Exception as e:
-                logger.error(f"❌ 群组 {chat_id} 处理出错: {e}")
+                logger.error(f"❌ 群组 {chat_id} 重置流程异常: {e}")
 
-        # 保持 60 秒检查一次
+        # 每 60 秒轮询一次
         await asyncio.sleep(60)
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):
@@ -5653,6 +5753,7 @@ async def health_check(request):
     return web.json_response({"status": "ok", "timestamp": time.time()})
 
 
+# 这个是适配render
 async def start_health_server():
     """Render 保活端口监听"""
     app = web.Application()
@@ -5664,6 +5765,28 @@ async def start_health_server():
     logger.info(
         f"🌐 Health check server running on port {Config.WEB_SERVER_CONFIG['PORT']}"
     )
+
+# 下满是适配Hugging Face (HF) Spaces
+# async def start_health_server():
+#     """为 Hugging Face / Render 提供的健康检查服务器"""
+#     app = web.Application()
+    
+#     # 响应根路径，方便外部保活工具访问
+#     async def handle_root(request):
+#         return web.Response(text="Bot is running!", content_type="text/plain")
+        
+#     app.router.add_get("/", handle_root)
+#     app.router.add_get("/health", handle_root)
+    
+#     runner = web.AppRunner(app)
+#     await runner.setup()
+    
+#     # ✅ 关键：必须绑定到 0.0.0.0 且端口为 7860
+#     port = int(os.environ.get("PORT", 7860)) 
+#     site = web.TCPSite(runner, "0.0.0.0", port)
+    
+#     await site.start()
+#     logger.info(f"✅ 健康检查服务器已在端口 {port} 启动")
 
 
 # =======================
@@ -5688,7 +5811,6 @@ async def optimized_main():
         ]
 
         normal_tasks = [
-            asyncio.create_task(auto_daily_export_task()),
             asyncio.create_task(daily_reset_task()),
             asyncio.create_task(efficient_monthly_export_task()),
             asyncio.create_task(monthly_report_task()),
@@ -5804,7 +5926,6 @@ async def webhook_main():
             asyncio.create_task(health_monitoring_task()),
             asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
             asyncio.create_task(daily_reset_task()),
-            asyncio.create_task(auto_daily_export_task()),
             asyncio.create_task(efficient_monthly_export_task()),
         ]
 
@@ -5858,7 +5979,6 @@ async def polling_main():
         asyncio.create_task(health_monitoring_task()),
         asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
         asyncio.create_task(daily_reset_task()),
-        asyncio.create_task(auto_daily_export_task()),
         asyncio.create_task(efficient_monthly_export_task()),
     ]
 
