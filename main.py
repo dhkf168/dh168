@@ -1331,6 +1331,7 @@ async def cmd_help(message: types.Message):
     )
 
     await safe_reply(
+        message,
         help_text,
         reply_markup=await get_main_keyboard(
             chat_id=message.chat.id, show_admin=await is_admin(uid)
