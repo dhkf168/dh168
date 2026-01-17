@@ -3758,6 +3758,7 @@ async def handle_back_to_main_menu(message: types.Message):
     """处理返回主菜单按钮 - 优化版本"""
     uid = message.from_user.id
     await safe_reply(
+        message,
         "已返回主菜单",
         reply_markup=await get_main_keyboard(
             chat_id=message.chat.id, show_admin=await is_admin(uid)
