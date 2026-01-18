@@ -119,7 +119,7 @@ class MessageFormatter:
             message += f"🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
 
         message += (
-            f"\n{dashed_line}\n"
+            f"{dashed_line}\n"
             f"💡 操作提示\n"
             f"活动结束后请及时点击 👉【✅ 回座打卡】👈按钮。"
         )
@@ -1076,4 +1076,5 @@ timer_manager = ActivityTimerManager()
 performance_optimizer = EnhancedPerformanceOptimizer()
 heartbeat_manager = HeartbeatManager()
 notification_service = NotificationService()
+
 
