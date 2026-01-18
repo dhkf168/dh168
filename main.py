@@ -3668,57 +3668,65 @@ async def handle_admin_panel_button(message: types.Message):
         return
 
     admin_text = (
-        "👑 <b>管理员面板</b>\n"
+        "👑 管理员面板\n"
         "━━━━━━━━━━━━━━━━━━━\n\n"
-        "📢 <b>频道与推送</b>\n"
+        
+        "📢 频道与推送\n"
         "├ /setchannel <频道ID>\n"
         "├ /setgroup <群组ID>\n"
         "├ /setpush <目标> <开关>\n"
         "│ 目标: ch|gr|ad\n"
         "│ 开关: on|off\n"
         "└ /showpush\n\n"
-        "🎯 <b>活动管理</b>\n"
+        
+        "🎯 活动管理\n"
         "├ /addactivity <名> <次> <分>\n"
         "├ /delactivity <活动名>\n"
         "├ /actnum <名> <人数>\n"
         "└ /actstatus\n\n"
-        "💰 <b>罚款管理</b>\n"
+        
+        "💰 罚款管理\n"
         "├ /setfine <名> <段> <钱>\n"
         "├ /setfines_all <t1> <f1>\n"
         "├ /setworkfine <类> <分> <钱>\n"
         "│ 类: start|end\n"
         "└ /finesstatus\n\n"
-        "🔄 <b>重置设置</b>\n"
+        
+        "🔄 重置设置\n"
         "├ /setresettime <时> <分>\n"
         "├ /setsoftresettime <时> <分>\n"
         "├ /reset <用户ID>\n"
         "└ /resettime\n\n"
-        "⏰ <b>上下班管理</b>\n"
+        
+        "⏰ 上下班管理\n"
         "├ /setworktime <上> <下>\n"
         "├ /worktime\n"
         "├ /delwork\n"
         "└ /delwork_clear\n\n"
-        "📊 <b>数据管理</b>\n"
+        
+        "📊 数据管理\n"
         "├ /export\n"
         "├ /exportmonthly [年] [月]\n"
         "├ /monthlyreport [年] [月]\n"
         "├ /cleanup_monthly [年] [月]\n"
         "├ /monthly_stats_status\n"
         "└ /cleanup_inactive [天]\n\n"
-        "💾 <b>数据显示</b>\n"
+        
+        "💾 数据显示\n"
         "└ /showsettings\n\n"
+        
         "━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <b>提示：</b>\n"
+        "💡 提示：\n"
         "• /help [命令] 查看详情\n"
         "• 长按命令可复制\n"
         "• 例: /setchannel @频道"
     )
-
+    
     await message.answer(
         admin_text,
         reply_markup=get_admin_keyboard(),
         reply_to_message_id=message.message_id,
-        parse_mode="HTML",
+        # 不要使用 parse_mode="HTML"
     )
 
 
