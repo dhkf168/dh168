@@ -939,7 +939,7 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                     msg = (
                         f"🚨 <b>超时警告</b>\n"
                         f"👤 {MessageFormatter.format_user_link(uid, nickname)} 已超时 <code>{overtime_minutes}</code> 分钟！\n"
-                        f"💢 请立刻回座，系统将持续记录超时,避免产生更多罚款！"
+                        f"💢 请立刻回座，避免产生更多罚款！"
                     )
 
                 if msg:
@@ -4913,3 +4913,4 @@ if __name__ == "__main__":
         logger.info("机器人已被用户中断")
     except Exception as e:
         logger.error(f"机器人运行异常: {e}")
+
