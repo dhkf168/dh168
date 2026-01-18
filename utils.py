@@ -120,8 +120,8 @@ class MessageFormatter:
 
         message += (
             f"{dashed_line}\n"
-            f"💡 操作提示\n"
-            f"活动结束后请及时点击 👉【✅ 回座打卡】👈按钮。"
+            f"💡 操作提示:活动结束后\n"
+            f"请及时点击 👉【✅ 回座打卡】👈按钮。"
         )
 
         return message
@@ -1076,5 +1076,6 @@ timer_manager = ActivityTimerManager()
 performance_optimizer = EnhancedPerformanceOptimizer()
 heartbeat_manager = HeartbeatManager()
 notification_service = NotificationService()
+
 
 
