@@ -121,7 +121,7 @@ class MessageFormatter:
         message += (
             f"{dashed_line}\n"
             f"💡 操作提示\n"
-            f"活动后请及时点击 👉【✅回座】👈按钮。"
+            f"活动结束后请及时点击 👉【✅ 回座打卡】👈按钮。"
         )
 
         return message
@@ -986,23 +986,46 @@ async def is_valid_checkin_time(
 
 # ========== 装饰器和工具函数 ==========
 def rate_limit(rate: int = 1, per: int = 1):
-    """速率限制装饰器"""
+    """速率限制装饰器 - 修复版（按用户ID隔离）"""
 
     def decorator(func):
-        calls = []
+        user_calls: Dict[int, List[float]] = {}
 
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            now = time.time()
-            # 清理过期记录
-            calls[:] = [call for call in calls if now - call < per]
+            event = args[0] if args else None
+            uid = None
 
+            if isinstance(event, types.Message):
+                uid = event.from_user.id
+            elif isinstance(event, types.CallbackQuery):
+                uid = event.from_user.id
+
+            if not uid:
+                return await func(*args, **kwargs)
+
+            now = time.time()
+
+            # ① 改动：用 setdefault，少一次 if 判断
+            calls = user_calls.setdefault(uid, [])
+
+            # ② 改动：就地清理，避免重新分配 list
+            calls[:] = [t for t in calls if now - t < per]
+
+            # ③ 改动：直接用 calls，避免重复 dict 索引
             if len(calls) >= rate:
-                if args and isinstance(args[0], types.Message):
-                    await args[0].answer("⏳ 操作过于频繁，请稍后再试")
+                if isinstance(event, types.Message):
+                    logger.debug(f"用户 {uid} 触发频率限制: {func.__name__}")
+                    await event.answer("⏳ 操作过于频繁，请稍后再试")
+                elif isinstance(event, types.CallbackQuery):
+                    await event.answer("⏳ 操作过于频繁，请稍后再试", show_alert=True)
                 return
 
             calls.append(now)
+
+            if len(user_calls) > 1000:
+                user_calls.clear()
+
             return await func(*args, **kwargs)
 
         return wrapper
@@ -1076,7 +1099,3 @@ timer_manager = ActivityTimerManager()
 performance_optimizer = EnhancedPerformanceOptimizer()
 heartbeat_manager = HeartbeatManager()
 notification_service = NotificationService()
-
-
-
-
