@@ -6,6 +6,7 @@ from functools import wraps
 from datetime import datetime, timedelta, date
 from typing import Dict, Optional, List
 from contextlib import suppress
+from aiogram.types import BotCommand, BotCommandScopeAllChatAdministrators
 
 
 # 配置日志
@@ -1533,8 +1534,8 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             allowed_end = (expected_dt + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M")
 
             await message.answer(
-                f"⏰ 当前时间不在允许的打卡范围内（前后7小时规则）！\n\n"
-                f"📅 期望打卡时间（参考）：<code>{expected_dt.strftime('%H:%M')}</code>\n"
+                f"⏰ 当前时间不在允许的打卡范围内（仅前后7小时可以打卡）！\n\n"
+                f"📅 打卡允许时间：<code>{expected_dt.strftime('%H:%M')}</code>\n"
                 f"🕒 允许范围（含日期）：\n"
                 f"   • 开始：<code>{allowed_start}</code>\n"
                 f"   • 结束：<code>{allowed_end}</code>\n\n"
@@ -3654,14 +3655,13 @@ async def handle_admin_panel_button(message: types.Message):
             Config.MESSAGES["no_permission"],
             reply_markup=markup,
             reply_to_message_id=message.message_id,
-            parse_mode=None
+            parse_mode=None,
         )
         return
 
     admin_text = (
         "👑 *管理员面板*\n"
         "━━━━━━━━━━━━━━━━\n\n"
-        
         "📢 *频道与推送*\n"
         "├ `/setchannel` \\[ID\\]\n"
         "├ `/setgroup` \\[ID\\]\n"
@@ -3669,32 +3669,27 @@ async def handle_admin_panel_button(message: types.Message):
         "├ `/showpush`\n"
         "│ 目标: ch\\|gr\\|ad\n"
         "│ 开关: on\\|off\n\n"
-        
         "🎯 *活动管理*\n"
         "├ `/addactivity` \\[名\\] \\[次\\] \\[分\\]\n"
         "├ `/delactivity` \\[名\\]\n"
         "├ `/actnum` \\[名\\] \\[人数\\]\n"
         "└ `/actstatus`\n\n"
-        
         "💰 *罚款管理*\n"
         "├ `/setfine` \\[名\\] \\[段\\] \\[元\\]\n"
         "├ `/setfines\\_all` \\[段1\\] \\[元1\\] \\.\\.\\.\n"
         "├ `/setworkfine` \\[类型\\] \\[分\\] \\[元\\]\n"
         "└ `/finesstatus`\n"
         "  类型: start\\|end\n\n"
-        
         "🔄 *重置设置*\n"
         "├ `/setresettime` \\[时\\] \\[分\\]\n"
         "├ `/setsoftresettime` \\[时\\] \\[分\\]\n"
         "├ `/resetuser` \\[用户ID\\]\n"
         "└ `/resettime`\n\n"
-        
         "⏰ *上下班管理*\n"
         "├ `/setworktime` \\[上\\] \\[下\\]\n"
         "├ `/worktime`\n"
         "├ `/delwork`\n"
         "└ `/delwork\\_clear`\n\n"
-        
         "📊 *数据管理*\n"
         "├ `/export`\n"
         "├ `/exportmonthly` \\[年\\] \\[月\\]\n"
@@ -3702,20 +3697,19 @@ async def handle_admin_panel_button(message: types.Message):
         "├ `/cleanup\\_monthly` \\[年\\] \\[月\\]\n"
         "├ `/monthly\\_stats\\_status`\n"
         "└ `/cleanup\\_inactive` \\[天\\]\n\n"
-        
         "💾 *数据显示*\n"
         "└ `/showsettings`\n\n"
-        
         "━━━━━━━━━━━━━━━━\n"
         "_💡 提示：发送 /help \\[命令\\] 查看详情_"
     )
-    
+
     await message.answer(
         admin_text,
         reply_markup=get_admin_keyboard(),
         reply_to_message_id=message.message_id,
-        parse_mode="MarkdownV2"
+        parse_mode="MarkdownV2",
     )
+
 
 # ========== 返回主菜单按钮处理 ==========
 @rate_limit(rate=5, per=60)
@@ -4823,15 +4817,61 @@ async def keepalive_loop():
 
 
 # ========== 启动流程 ==========
+# 可回退版本
+# async def on_startup():
+#     """启动时执行 - 更新版本"""
+#     logger.info("🎯 机器人启动中...")
+#     try:
+#         # 删除webhook确保使用轮询模式（已在bot_manager中处理）
+#         # 初始化服务（已在main中调用initialize_services）
+#         logger.info("✅ 系统启动完成，准备接收消息")
+
+#         # 发送启动通知给管理员
+#         await send_startup_notification()
+
+#     except Exception as e:
+#         logger.error(f"启动过程异常: {e}")
+#         raise
+
 async def on_startup():
-    """启动时执行 - 更新版本"""
+    """启动时执行 - 包含全量快捷菜单"""
     logger.info("🎯 机器人启动中...")
     try:
-        # 删除webhook确保使用轮询模式（已在bot_manager中处理）
-        # 初始化服务（已在main中调用initialize_services）
-        logger.info("✅ 系统启动完成，准备接收消息")
+        # 1. 定义【普通用户】菜单 (包含打卡指令)
+        user_commands = [
+            BotCommand(command="workstart", description="🏢 上班打卡"),
+            BotCommand(command="workend", description="🏠 下班打卡"),
+            BotCommand(command="ci", description="🏃 任务打卡 (格式: /ci 活动名)"),
+            BotCommand(command="at", description="🔙 回座打卡 (格式: /at 备注)"),
+            BotCommand(command="myinfo", description="👤 我的统计"),
+            BotCommand(command="ranking", description="🏆 今日排行"),
+            BotCommand(command="help", description="❓ 使用帮助"),
+        ]
+        
+        # 2. 定义【管理员】专属菜单
+        admin_commands = [
+            BotCommand(command="actstatus", description="📊 活跃活动统计"),
+            BotCommand(command="showsettings", description="⚙️ 查看系统配置"),
+            BotCommand(command="finesstatus", description="📈 罚款费率查询"),
+            BotCommand(command="worktime", description="⌚ 考勤时间设置"),
+            BotCommand(command="export", description="📤 导出今日报表"),
+            BotCommand(command="checkdb", description="🏥 数据库体检"),
+            BotCommand(command="help", description="🛠 管理员全指令指南"),
+        ]
 
-        # 发送启动通知给管理员
+        # 3. 注册到 Telegram 服务器
+        # 注册默认菜单（所有人可见）
+        await bot_manager.bot.set_my_commands(commands=user_commands)
+        
+        # 覆盖管理员看到的菜单
+        await bot_manager.bot.set_my_commands(
+            commands=admin_commands, 
+            scope=BotCommandScopeAllChatAdministrators() 
+        )
+        logger.info("✅ 所有快捷指令（含打卡指令）已成功同步")
+
+        # 4. 原有逻辑保持不变
+        logger.info("✅ 系统启动完成，准备接收消息")
         await send_startup_notification()
 
     except Exception as e:
@@ -4931,4 +4971,3 @@ if __name__ == "__main__":
         logger.info("机器人已被用户中断")
     except Exception as e:
         logger.error(f"机器人运行异常: {e}")
-
