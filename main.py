@@ -3647,82 +3647,79 @@ async def handle_rank(message: types.Message):
 
 @rate_limit(rate=5, per=60)
 async def handle_admin_panel_button(message: types.Message):
-    """处理管理员面板按钮"""
+    """处理管理员面板按钮 - 优化版"""
     if not await is_admin(message.from_user.id):
-        # 注意：这里也移除了 get_main_keyboard 的 await (如果是同步函数)
+        markup = await get_main_keyboard(chat_id=message.chat.id, show_admin=False)
         await message.answer(
             Config.MESSAGES["no_permission"],
-            reply_markup=get_main_keyboard(
-                chat_id=message.chat.id, show_admin=False
-            ),
-            reply_to_message_id=message.message_id
+            reply_markup=markup,
+            reply_to_message_id=message.message_id,
+            parse_mode=None
         )
         return
 
-    # 已将所有的 < > 替换为 [ ]，防止 Telegram 报错
     admin_text = (
         "┌───────────────────────┐\n"
-        "│  👑 管理员面板\n"
+        "│  👑 *管理员面板*\n"
         "├───────────────────────┤\n\n"
         
-        "📢 频道与推送管理\n"
-        "├─ 🔗 /setchannel [频道ID]\n"
-        "├─ 👥 /setgroup [群组ID]\n"
-        "├─ ⚙️ /setpush [目标] [开关]\n"
-        "│   (目标: channel|group|admin)\n"
-        "│   (开关: on|off)\n"
-        "└─ 👀 /showpush\n\n"
+        "📢 *频道与推送管理*\n"
+        "├─ 🔗 `/setchannel` \\[频道ID\\]\n"
+        "├─ 👥 `/setgroup` \\[群组ID\\]\n"
+        "├─ ⚙️ `/setpush` \\[目标\\] \\[开关\\]\n"
+        "│   \\(目标: ch\\|gr\\|ad\\)\n"
+        "│   \\(开关: on\\|off\\)\n"
+        "└─ 👀 `/showpush`\n\n"
         
-        "🎯 活动管理\n"
-        "├─ ➕ /addactivity [活动名] [次数] [分钟]\n"
-        "├─ 🗑️ /delactivity [活动名]\n"
-        "├─ 👥 /actnum [活动名] [人数]\n"
-        "└─ 📊 /actstatus\n\n"
+        "🎯 *活动管理*\n"
+        "├─ ➕ `/addactivity` \\[名\\] \\[次\\] \\[分\\]\n"
+        "├─ 🗑️ `/delactivity` \\[名\\]\n"
+        "├─ 👥 `/actnum` \\[名\\] \\[人数\\]\n"
+        "└─ 📊 `/actstatus`\n\n"
         
-        "💰 罚款管理\n"
-        "├─ 💸 /setfine [活动名] [时间段] [金额]\n"
-        "├─ 📋 /setfines_all [t1] [f1] [t2 f2...]\n"
-        "├─ ⏰ /setworkfine [类型] [分钟1] [罚款1]\n"
-        "│   (类型: work_start|work_end)\n"
-        "└─ 📈 /finesstatus\n\n"
+        "💰 *罚款管理*\n"
+        "├─ 💸 `/setfine` \\[名\\] \\[段\\] \\[元\\]\n"
+        "├─ 📋 `/setfines\\_all` \\[段1\\] \\[元1\\] \\.\\.\\.\n"
+        "├─ ⏰ `/setworkfine` \\[类型\\] \\[分\\] \\[元\\]\n"
+        "│   \\(类型: start\\|end\\)\n"
+        "└─ 📈 `/finesstatus`\n\n"
         
-        "🔄 重置设置\n"
-        "├─ 🕐 /setresettime [小时] [分钟]\n"
-        "├─ 🕑 /setsoftresettime [小时] [分钟]\n"
-        "├─ 🔄 /reset [用户ID]\n"
-        "└─ 👀 /resettime\n\n"
+        "🔄 *重置设置*\n"
+        "├─ 🕐 `/setresettime` \\[时\\] \\[分\\]\n"
+        "├─ 🕑 `/setsoftresettime` \\[时\\] \\[分\\]\n"
+        "├─ 🔄 `/resetuser` \\[用户ID\\]\n"
+        "└─ 👀 `/resettime`\n\n"
         
-        "⏰ 上下班管理\n"
-        "├─ 🏢 /setworktime [上班] [下班]\n"
-        "├─ 👀 /worktime\n"
-        "├─ 🗑️ /delwork\n"
-        "└─ 🧹 /delwork_clear\n\n"
+        "⏰ *上下班管理*\n"
+        "├─ 🏢 `/setworktime` \\[上\\] \\[下\\]\n"
+        "├─ 👀 `/worktime`\n"
+        "├─ 🗑️ `/delwork`\n"
+        "└─ 🧹 `/delwork\\_clear`\n\n"
         
-        "📊 数据管理\n"
-        "├─ 📤 /export\n"
-        "├─ 📅 /exportmonthly [年] [月]\n"
-        "├─ 📋 /monthlyreport [年] [月]\n"
-        "├─ 🗑️ /cleanup_monthly [年] [月]\n"
-        "├─ 📈 /monthly_stats_status\n"
-        "└─ 👤 /cleanup_inactive [天数]\n\n"
+        "📊 *数据管理*\n"
+        "├─ 📤 `/export`\n"
+        "├─ 📅 `/exportmonthly` \\[年\\] \\[月\\]\n"
+        "├─ 📋 `/monthlyreport` \\[年\\] \\[月\\]\n"
+        "├─ 🗑️ `/cleanup\\_monthly` \\[年\\] \\[月\\]\n"
+        "├─ 📈 `/monthly\\_stats\\_status`\n"
+        "└─ 👤 `/cleanup\\_inactive` \\[天\\]\n\n"
         
-        "💾 数据显示\n"
-        "└─ ⚙️ /showsettings\n\n"
+        "💾 *数据显示*\n"
+        "└─ ⚙️ `/showsettings`\n\n"
         
         "─────────────────────────\n"
-        "💡 提示：\n"
-        "• 发送 /help [命令] 查看详细说明\n"
+        "_💡 提示：_ \n"
+        "• 发送 `/help \\[命令\\]` 查看详情\n"
         "• 长按命令可快速复制\n"
-        "• 使用示例: /setchannel @频道名"
+        "• 示例: `/setchannel \\-1001234567890`"
     )
     
-    # 彻底修复：移除 get_admin_keyboard 的 await，并确保文本中没有 HTML 干扰
     await message.answer(
-        admin_text, 
-        reply_markup=get_admin_keyboard(), 
-        reply_to_message_id=message.message_id
+        admin_text,
+        reply_markup=get_admin_keyboard(),
+        reply_to_message_id=message.message_id,
+        parse_mode="MarkdownV2"
     )
-
 
 # ========== 返回主菜单按钮处理 ==========
 @rate_limit(rate=5, per=60)
