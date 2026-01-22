@@ -3645,7 +3645,6 @@ async def handle_rank(message: types.Message):
         await show_rank(message)
 
 
-@rate_limit(rate=5, per=60)
 async def handle_admin_panel_button(message: types.Message):
     """处理管理员面板按钮"""
     if not await is_admin(message.from_user.id):
@@ -3702,6 +3701,7 @@ async def handle_admin_panel_button(message: types.Message):
         "💡 <b>提示：</b>\n"
         "• /help [命令] 查看详情\n"
         "• 长按命令可复制\n"
+        # 修改这里，删除"id"字样
         "• 例: /setchannel @频道"
     )
 
