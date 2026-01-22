@@ -3660,7 +3660,7 @@ async def handle_admin_panel_button(message: types.Message):
 
     admin_text = (
         "👑 *管理员面板*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
         
         "📢 *频道与推送*\n"
         "├ `/setchannel` \\[ID\\]\n"
@@ -3706,7 +3706,7 @@ async def handle_admin_panel_button(message: types.Message):
         "💾 *数据显示*\n"
         "└ `/showsettings`\n\n"
         
-        "━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━\n"
         "_💡 提示：发送 /help \\[命令\\] 查看详情_"
     )
     
@@ -4931,3 +4931,4 @@ if __name__ == "__main__":
         logger.info("机器人已被用户中断")
     except Exception as e:
         logger.error(f"机器人运行异常: {e}")
+
