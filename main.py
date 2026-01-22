@@ -3405,10 +3405,12 @@ async def cmd_setworkfine(message: types.Message):
         迟到30分钟以上罚500
     """
     args = message.text.split()
+
+    # 1. 检查参数长度和格式
     if len(args) < 4 or (len(args) - 2) % 2 != 0:
         await message.answer(
             "❌ 用法错误\n正确格式：/setworkfine <work_start|work_end> <分钟1> <罚款1> [分钟2 罚款2 ...]",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
         return
@@ -3417,12 +3419,12 @@ async def cmd_setworkfine(message: types.Message):
     if checkin_type not in ["work_start", "work_end"]:
         await message.answer(
             "❌ 类型必须是 work_start 或 work_end",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
         return
 
-    # 解析分钟阈值和罚款金额
+    # 2. 解析分钟阈值和罚款金额
     fine_segments = {}
     try:
         for i in range(2, len(args), 2):
@@ -3431,17 +3433,18 @@ async def cmd_setworkfine(message: types.Message):
             if minute <= 0 or amount < 0:
                 await message.answer(
                     "❌ 分钟必须大于0，罚款金额不能为负数",
-                    reply_markup=await get_admin_keyboard(),
+                    reply_markup=get_admin_keyboard(),  # 已移除 await
                     reply_to_message_id=message.message_id,
                 )
                 return
             fine_segments[str(minute)] = amount
 
-        # 更新数据库配置（重写整个罚款配置）
+        # 3. 更新数据库配置（重写整个罚款配置）
         await db.clear_work_fine_rates(checkin_type)
         for minute_str, fine_amount in fine_segments.items():
             await db.update_work_fine_rate(checkin_type, minute_str, fine_amount)
 
+        # 4. 生成反馈文本
         segments_text = "\n".join(
             [
                 f"⏰ 超过 {m} 分钟 → 💰 {a} 元"
@@ -3453,23 +3456,23 @@ async def cmd_setworkfine(message: types.Message):
 
         await message.answer(
             f"✅ 已设置{type_text}罚款规则：\n{segments_text}",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
 
-        logger.info(f"设置上下班罚款: {checkin_type} -> {fine_segments}")
+        logger.info(f"设置上下班罚款成功: {checkin_type} -> {fine_segments}")
 
     except ValueError:
         await message.answer(
             "❌ 分钟和罚款必须是数字",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
     except Exception as e:
         logger.error(f"设置上下班罚款失败: {e}")
         await message.answer(
             f"❌ 设置失败：{e}",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
 
