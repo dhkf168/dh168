@@ -6,6 +6,7 @@ from functools import wraps
 from datetime import datetime, timedelta, date
 from typing import Dict, Optional, List
 from contextlib import suppress
+from aiogram.types import BotCommand, BotCommandScopeAllChatAdministrators
 
 
 # 配置日志
@@ -140,6 +141,15 @@ SPECIAL_BUTTONS = {
     "✅ 回座": "back",
     "🟢 上班": "work_start",
     "🔴 下班": "work_end",
+}
+
+# 🆕 官方指令映射配置 (英文指令: 中文活动名)
+# Telegram 指令只支持小写字母、数字和下划线
+ACTIVITY_MAP = {
+    "wc_small": "小厕",
+    "wc_large": "大厕",
+    "smoke": "抽烟",
+    "eat": "吃饭",
 }
 
 
@@ -1416,6 +1426,21 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
     uid = message.from_user.id
     name = message.from_user.full_name
 
+    if not await db.has_work_hours_enabled(chat_id):
+        await message.answer(
+            "❌ 本群组尚未启用上下班打卡功能\n\n"
+            "👑 请联系管理员使用命令：\n"
+            "<code>/setworktime 09:00 18:00</code>\n"
+            "设置上下班时间后即可使用",
+            reply_markup=await get_main_keyboard(
+                chat_id=chat_id, show_admin=await is_admin(uid)
+            ),
+            reply_to_message_id=message.message_id,
+            parse_mode="HTML",
+        )
+        logger.info(f"❌ 群组 {chat_id} 未启用上下班功能，用户 {uid} 尝试打卡")
+        return
+
     now = get_beijing_time()
     current_time = now.strftime("%H:%M")
 
@@ -1533,8 +1558,8 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             allowed_end = (expected_dt + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M")
 
             await message.answer(
-                f"⏰ 当前时间不在允许的打卡范围内（前后7小时规则）！\n\n"
-                f"📅 期望打卡时间（参考）：<code>{expected_dt.strftime('%H:%M')}</code>\n"
+                f"⏰ 当前时间不在允许的打卡范围内（仅前后7小时可以打卡）！\n\n"
+                f"📅 打卡允许时间：<code>{expected_dt.strftime('%H:%M')}</code>\n"
                 f"🕒 允许范围（含日期）：\n"
                 f"   • 开始：<code>{allowed_start}</code>\n"
                 f"   • 结束：<code>{allowed_end}</code>\n\n"
@@ -1737,33 +1762,26 @@ async def cmd_help(message: types.Message):
     uid = message.from_user.id
 
     help_text = (
-        "───────────────────────────┤\n"
-        "│  📋 打卡机器人使用帮助\n"
-        "───────────────────────────┤\n\n"
-        "🟢 <b>开始活动打卡</b>\n"
-        "├─ 📝 直接输入活动名称\n"
-        "├─ ⌨️ 使用命令：/ci 活动名\n"
-        "└─ 📱 点击下方活动按钮\n\n"
-        "🔴 <b>结束活动回座</b>\n"
-        "├─ 📝 直接输入：回座\n"
-        "├─ ⌨️ 使用命令：/at\n"
-        "└─ 📱 点击下方 ✅ 回座 按钮\n\n"
-        "🕒 <b>上下班打卡</b>\n"
-        "├─ 🟢 /workstart - 上班打卡\n"
-        "├─ 🔴 /workend - 下班打卡\n"
-        "└─ 📱 点击上下班按钮\n\n"
-        "📊 <b>查看记录</b>\n"
-        "├─ 📈 点击 📊 我的记录 查看个人统计\n"
-        "└─ 🏆 点击 🏆 排行榜 查看群内排名\n\n"
-        "🔧 <b>其他命令</b>\n"
-        "├─ 🚀 /start - 开始使用机器人\n"
-        "├─ 🏠 /menu - 显示主菜单\n"
-        "└─ ❓ /help - 显示此帮助信息\n\n"
-        "───────────────────────────\n"
-        "💡 <b>提示：</b>\n"
-        "• 活动名称区分大小写\n"
-        "• 打卡后请记得回座\n"
-        "• 每天数据会定时重置"
+        "📋 打卡机器人使用帮助\n\n"
+        "🟢 开始活动打卡：\n"
+        "• 直接输入活动名称\n"
+        "• 或使用命令：/ci 活动名\n"
+        "• 或点击下方活动按钮\n\n"
+        "🔴 结束活动回座：\n"
+        "• 直接输入：回座\n"
+        "• 或使用命令：/at\n"
+        "• 或点击下方 ✅ 回座 按钮\n\n"
+        "🕒 上下班打卡：\n"
+        "• /workstart - 上班打卡\n"
+        "• /workend - 下班打卡\n"
+        "• 或点击 🟢 上班 和 🔴 下班 按钮\n\n"
+        "📊 查看记录：\n"
+        "• 点击 📊 我的记录 查看个人统计\n"
+        "• 点击 🏆 排行榜 查看群内排名\n\n"
+        "🔧 其他命令：\n"
+        "• /start - 开始使用机器人\n"
+        "• /menu - 显示主菜单\n"
+        "• /help - 显示此帮助信息"
     )
 
     await message.answer(
@@ -1774,32 +1792,6 @@ async def cmd_help(message: types.Message):
         reply_to_message_id=message.message_id,
         parse_mode="HTML",
     )
-
-
-# ========== 排行榜命令 ==========
-@rate_limit(rate=10, per=60)
-@track_performance("cmd_ranking")
-async def cmd_ranking(message: types.Message):
-    """显示排行榜"""
-    chat_id = message.chat.id
-    uid = message.from_user.id
-
-    user_lock = user_lock_manager.get_lock(chat_id, uid)
-    async with user_lock:
-        await show_rank(message)
-
-
-# ========== 我的统计命令 ==========
-@rate_limit(rate=10, per=60)
-@track_performance("cmd_myinfo")
-async def cmd_myinfo(message: types.Message):
-    """显示我的统计信息"""
-    chat_id = message.chat.id
-    uid = message.from_user.id
-
-    user_lock = user_lock_manager.get_lock(chat_id, uid)
-    async with user_lock:
-        await show_history(message)
 
 
 @rate_limit(rate=10, per=60)
@@ -3438,10 +3430,12 @@ async def cmd_setworkfine(message: types.Message):
         迟到30分钟以上罚500
     """
     args = message.text.split()
+
+    # 1. 检查参数长度和格式
     if len(args) < 4 or (len(args) - 2) % 2 != 0:
         await message.answer(
             "❌ 用法错误\n正确格式：/setworkfine <work_start|work_end> <分钟1> <罚款1> [分钟2 罚款2 ...]",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
         return
@@ -3450,12 +3444,12 @@ async def cmd_setworkfine(message: types.Message):
     if checkin_type not in ["work_start", "work_end"]:
         await message.answer(
             "❌ 类型必须是 work_start 或 work_end",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
         return
 
-    # 解析分钟阈值和罚款金额
+    # 2. 解析分钟阈值和罚款金额
     fine_segments = {}
     try:
         for i in range(2, len(args), 2):
@@ -3464,17 +3458,18 @@ async def cmd_setworkfine(message: types.Message):
             if minute <= 0 or amount < 0:
                 await message.answer(
                     "❌ 分钟必须大于0，罚款金额不能为负数",
-                    reply_markup=await get_admin_keyboard(),
+                    reply_markup=get_admin_keyboard(),  # 已移除 await
                     reply_to_message_id=message.message_id,
                 )
                 return
             fine_segments[str(minute)] = amount
 
-        # 更新数据库配置（重写整个罚款配置）
+        # 3. 更新数据库配置（重写整个罚款配置）
         await db.clear_work_fine_rates(checkin_type)
         for minute_str, fine_amount in fine_segments.items():
             await db.update_work_fine_rate(checkin_type, minute_str, fine_amount)
 
+        # 4. 生成反馈文本
         segments_text = "\n".join(
             [
                 f"⏰ 超过 {m} 分钟 → 💰 {a} 元"
@@ -3486,23 +3481,23 @@ async def cmd_setworkfine(message: types.Message):
 
         await message.answer(
             f"✅ 已设置{type_text}罚款规则：\n{segments_text}",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
 
-        logger.info(f"设置上下班罚款: {checkin_type} -> {fine_segments}")
+        logger.info(f"设置上下班罚款成功: {checkin_type} -> {fine_segments}")
 
     except ValueError:
         await message.answer(
             "❌ 分钟和罚款必须是数字",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
     except Exception as e:
         logger.error(f"设置上下班罚款失败: {e}")
         await message.answer(
             f"❌ 设置失败：{e}",
-            reply_markup=await get_admin_keyboard(),
+            reply_markup=get_admin_keyboard(),  # 已移除 await
             reply_to_message_id=message.message_id,
         )
 
@@ -3624,7 +3619,21 @@ async def handle_back_command(message: types.Message):
 @rate_limit(rate=5, per=60)
 async def handle_work_buttons(message: types.Message):
     """处理上下班按钮"""
+    chat_id = message.chat.id
+    uid = message.from_user.id
     text = message.text.strip()
+
+    # 🎯 新增检查：是否启用了上下班功能
+    if not await db.has_work_hours_enabled(chat_id):
+        await message.answer(
+            "❌ 本群组尚未启用上下班打卡功能\n\n" "👑 请联系管理员设置上下班时间",
+            reply_markup=await get_main_keyboard(
+                chat_id=chat_id, show_admin=await is_admin(uid)
+            ),
+            reply_to_message_id=message.message_id,
+        )
+        return
+
     if text == "🟢 上班":
         await process_work_checkin(message, "work_start")
     elif text == "🔴 下班":
@@ -3677,69 +3686,66 @@ async def handle_rank(message: types.Message):
 
 @rate_limit(rate=5, per=60)
 async def handle_admin_panel_button(message: types.Message):
-    """处理管理员面板按钮 - 移动端优化版"""
+    """处理管理员面板按钮 - 简洁手机版"""
     if not await is_admin(message.from_user.id):
+        markup = await get_main_keyboard(chat_id=message.chat.id, show_admin=False)
         await message.answer(
             Config.MESSAGES["no_permission"],
-            reply_markup=await get_main_keyboard(
-                chat_id=message.chat.id, show_admin=False
-            ),
+            reply_markup=markup,
             reply_to_message_id=message.message_id,
+            parse_mode=None,
         )
         return
 
     admin_text = (
-        "┌──────────────────────┐\n"
-        "│   👑 管理员面板      │\n"
-        "├──────────────────────┤\n\n"
-        "📢 频道与推送\n"
-        "├ /setchannel <频道ID>\n"
-        "├ /setgroup <群组ID>\n"
-        "├ /setpush <目标> <开关>\n"
-        "│ 目标: ch|gr|ad\n"
-        "│ 开关: on|off\n"
-        "└ /showpush\n\n"
-        "🎯 活动管理\n"
-        "├ /addactivity <名> <次> <分>\n"
-        "├ /delactivity <活动名>\n"
-        "├ /actnum <名> <人数>\n"
-        "└ /actstatus\n\n"
-        "💰 罚款管理\n"
-        "├ /setfine <名> <段> <钱>\n"
-        "├ /setfines_all <t1> <f1>\n"
-        "├ /setworkfine <类> <分> <钱>\n"
-        "│ 类: start|end\n"
-        "└ /finesstatus\n\n"
-        "🔄 重置设置\n"
-        "├ /setresettime <时> <分>\n"
-        "├ /setsoftresettime <时> <分>\n"
-        "├ /reset <用户ID>\n"
-        "└ /resettime\n\n"
-        "⏰ 上下班管理\n"
-        "├ /setworktime <上> <下>\n"
-        "├ /worktime\n"
-        "├ /delwork\n"
-        "└ /delwork_clear\n\n"
-        "📊 数据管理\n"
-        "├ /export\n"
-        "├ /exportmonthly [年] [月]\n"
-        "├ /monthlyreport [年] [月]\n"
-        "├ /cleanup_monthly [年] [月]\n"
-        "├ /monthly_stats_status\n"
-        "└ /cleanup_inactive [天]\n\n"
-        "💾 数据显示\n"
-        "└ /showsettings\n\n"
-        "───────────────────────\n"
-        "💡 提示：\n"
-        "• /help [命令] 查看详情\n"
-        "• 长按命令可复制\n"
-        "• 例: /setchannel @频道"
+        "👑 *管理员面板*\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "📢 *频道与推送*\n"
+        "├ `/setchannel` \\[ID\\]\n"
+        "├ `/setgroup` \\[ID\\]\n"
+        "├ `/setpush` \\[目标\\] \\[开关\\]\n"
+        "├ `/showpush`\n"
+        "│ 目标: ch\\|gr\\|ad\n"
+        "│ 开关: on\\|off\n\n"
+        "🎯 *活动管理*\n"
+        "├ `/addactivity` \\[名\\] \\[次\\] \\[分\\]\n"
+        "├ `/delactivity` \\[名\\]\n"
+        "├ `/actnum` \\[名\\] \\[人数\\]\n"
+        "└ `/actstatus`\n\n"
+        "💰 *罚款管理*\n"
+        "├ `/setfine` \\[名\\] \\[段\\] \\[元\\]\n"
+        "├ `/setfines\\_all` \\[段1\\] \\[元1\\] \\.\\.\\.\n"
+        "├ `/setworkfine` \\[类型\\] \\[分\\] \\[元\\]\n"
+        "└ `/finesstatus`\n"
+        "  类型: start\\|end\n\n"
+        "🔄 *重置设置*\n"
+        "├ `/setresettime` \\[时\\] \\[分\\]\n"
+        "├ `/setsoftresettime` \\[时\\] \\[分\\]\n"
+        "├ `/resetuser` \\[用户ID\\]\n"
+        "└ `/resettime`\n\n"
+        "⏰ *上下班管理*\n"
+        "├ `/setworktime` \\[上\\] \\[下\\]\n"
+        "├ `/worktime`\n"
+        "├ `/delwork`\n"
+        "└ `/delwork\\_clear`\n\n"
+        "📊 *数据管理*\n"
+        "├ `/export`\n"
+        "├ `/exportmonthly` \\[年\\] \\[月\\]\n"
+        "├ `/monthlyreport` \\[年\\] \\[月\\]\n"
+        "├ `/cleanup\\_monthly` \\[年\\] \\[月\\]\n"
+        "├ `/monthly\\_stats\\_status`\n"
+        "└ `/cleanup\\_inactive` \\[天\\]\n\n"
+        "💾 *数据显示*\n"
+        "└ `/showsettings`\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "_💡 提示：发送 /help \\[命令\\] 查看详情_"
     )
 
     await message.answer(
         admin_text,
         reply_markup=get_admin_keyboard(),
         reply_to_message_id=message.message_id,
+        parse_mode="MarkdownV2",
     )
 
 
@@ -3799,6 +3805,44 @@ async def handle_all_text_messages(message: types.Message):
         reply_to_message_id=message.message_id,
         parse_mode="HTML",
     )
+
+
+# ========== 固定活动命令处理器 ==========
+@rate_limit(rate=10, per=60)
+@message_deduplicate
+@with_retry("fixed_activity", max_retries=2)
+@track_performance("fixed_activity")
+async def handle_fixed_activity(message: types.Message):
+    """处理固定活动命令（支持带用户名格式）"""
+    # 获取完整的命令文本
+    command_text = message.text.strip()
+    logger.info(f"🔍 收到命令: {command_text}")
+
+    # 定义活动映射
+    activity_map = {
+        "/wc": "小厕",
+        "/bigwc": "大厕",
+        "/eat": "吃饭",
+        "/smoke": "抽烟",
+        "/rest": "休息",
+    }
+
+    # 1. 检查纯命令（如 /wc）
+    if command_text in activity_map:
+        act = activity_map[command_text]
+        logger.info(f"✅ 匹配到纯命令: {command_text} -> {act}")
+        await start_activity(message, act)
+        return
+
+    # 2. 检查带用户名的命令（如 /wc@dh188_bot）
+    for cmd, act in activity_map.items():
+        if command_text.startswith(cmd + "@"):
+            logger.info(f"✅ 匹配到带用户名命令: {command_text} -> {act}")
+            await start_activity(message, act)
+            return
+
+    # 3. 都不是，让其他处理器处理
+    logger.warning(f"❌ 未匹配的命令: {command_text}")
 
 
 # ========== 用户功能 ==========
@@ -4128,7 +4172,7 @@ async def export_and_push_csv(
     file_name: str = None,
     target_date=None,
 ):
-    """导出群组数据为 CSV 并推送 - 基于 daily_statistics 表（完整版）"""
+    """导出群组数据为 CSV 并推送 - 基于 daily_statistics 表（完整修复版）"""
     await db.init_group(chat_id)
 
     # 规范 target_date
@@ -4147,7 +4191,7 @@ async def export_and_push_csv(
 
     activity_limits = await db.get_activity_limits_cached()
 
-    # 🎯 修改表头，添加重置类型列
+    # 🎯 核心表头定义
     headers = ["用户ID", "用户昵称", "重置类型"]
     for act in activity_limits.keys():
         headers.extend([f"{act}次数", f"{act}总时长"])
@@ -4158,21 +4202,19 @@ async def export_and_push_csv(
             "罚款总金额",
             "超时次数",
             "总超时时间",
-            "工作天数",
-            "工作时长",
+            "工作天数",  # 🆕 已包含
+            "工作时长",  # 🆕 已包含
         ]
     )
     writer.writerow(headers)
 
-    # ✅ 保留第一个代码的数据存在性检查
     has_data = False
 
-    # 🎯 直接从 daily_statistics 获取数据
+    # 🎯 调用之前修复好的数据库查询函数
     group_stats = await db.get_group_statistics(chat_id, target_date)
 
     # 处理每个用户的数据
     for user_data in group_stats:
-        # 🆕 最小修复：只在需要的地方添加保护
         if not isinstance(user_data, dict):
             continue
 
@@ -4181,25 +4223,25 @@ async def export_and_push_csv(
         if not isinstance(user_activities, dict):
             user_activities = {}
 
-        # ✅ 保留第一个代码的 has_data 检查逻辑
+        # 检查是否包含有效数据（活动或罚款）
         total_count = user_data.get("total_activity_count", 0)
         total_time = user_data.get("total_accumulated_time", 0)
-        if total_count > 0 or total_time > 0:
+        total_fines = user_data.get("total_fines", 0)
+
+        if total_count > 0 or total_time > 0 or total_fines > 0:
             has_data = True
 
-        # 🎯 第二个代码的改进：添加重置类型列
-        # 但 user_data 中可能没有 reset_type 字段，需要处理
+        # 🎯 软重置状态检查逻辑
         reset_type = "硬重置"
-        # 可以从数据库中查询软重置状态
         if target_date:
             try:
-                # 检查是否有软重置标记
+                # 检查是否存在软重置标记行
                 soft_reset_exists = await db.execute_with_retry(
                     "检查软重置",
                     """
                     SELECT 1 FROM daily_statistics 
                     WHERE chat_id = $1 AND user_id = $2 AND record_date = $3 
-                    AND activity_name = 'soft_reset_flag' AND is_soft_reset = TRUE
+                    AND activity_name = 'soft_reset'
                     LIMIT 1
                     """,
                     chat_id,
@@ -4212,15 +4254,16 @@ async def export_and_push_csv(
             except Exception as e:
                 logger.debug(f"检查软重置状态失败: {e}")
 
+        # 构建基础行数据
         row = [
             user_data.get("user_id", "未知"),
             user_data.get("nickname", "未知用户"),
-            reset_type,  # 🎯 新增重置类型列
+            reset_type,
         ]
 
+        # 填充各项动态配置的活动数据
         for act in activity_limits.keys():
             activity_info = user_activities.get(act, {})
-            # 🆕 安全获取活动数据
             if not isinstance(activity_info, dict):
                 activity_info = {}
 
@@ -4230,31 +4273,32 @@ async def export_and_push_csv(
             row.append(count)
             row.append(time_str)
 
+        # 格式化通用统计数据
         total_seconds_all = int(user_data.get("total_accumulated_time", 0) or 0)
         total_time_str = MessageFormatter.format_time_for_csv(total_seconds_all)
 
         overtime_seconds = int(user_data.get("total_overtime_time", 0) or 0)
         overtime_str = MessageFormatter.format_time_for_csv(overtime_seconds)
 
-        # 🆕 安全获取工作相关字段
+        # 🆕 提取并格式化工作相关字段 (对应 database.py 中返回的 final_work_days 等)
         work_days = user_data.get("work_days", 0)
-        work_hours = int(user_data.get("work_hours", 0) or 0)
-        work_hours_str = MessageFormatter.format_time_for_csv(work_hours)
+        work_hours_seconds = int(user_data.get("work_hours", 0) or 0)
+        work_hours_str = MessageFormatter.format_time_for_csv(work_hours_seconds)
 
         row.extend(
             [
-                total_count,  # ✅ 使用已经检查过的 total_count
+                total_count,
                 total_time_str,
                 user_data.get("total_fines", 0),
                 user_data.get("overtime_count", 0),
                 overtime_str,
-                work_days,  # 🆕 工作天数
-                work_hours_str,  # 🆕 工作时长
+                work_days,  # 写入 CSV
+                work_hours_str,  # 写入 CSV
             ]
         )
         writer.writerow(row)
 
-    # ✅ 保留第一个代码的 no data 检查
+    # 数据空值检查
     if not has_data:
         await bot.send_message(chat_id, "⚠️ 当前群组没有数据需要导出")
         return
@@ -4274,17 +4318,15 @@ async def export_and_push_csv(
         except:
             pass
 
-        # 🎯 改进描述
         caption = (
             f"📊 群组：<b>{chat_title}</b>\n"
             f"📅 统计日期：<code>{(target_date.strftime('%Y-%m-%d') if target_date else get_beijing_time().strftime('%Y-%m-%d'))}</code>\n"
             f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
             f"{MessageFormatter.create_dashed_line()}\n"
-            f"💾 包含每个用户每日的活动统计）\n"
+            f"💾 包含每个用户每日的活动统计及工作时长\n"
         )
 
-        # ✅ 保留第一个代码的发送逻辑
-        # 先把文件发回到当前 chat（可选）
+        # 发送到请求数据的当前聊天
         try:
             csv_input_file = FSInputFile(temp_file, filename=file_name)
             await bot.send_document(
@@ -4293,9 +4335,8 @@ async def export_and_push_csv(
         except Exception as e:
             logger.warning(f"发送到当前聊天失败: {e}")
 
-        # ✅ 处理 to_admin_if_no_group 参数
+        # 如果开启了推送功能，发送到管理员频道/群组
         if to_admin_if_no_group:
-            # 使用统一的 NotificationService 推送到绑定的频道/群组/管理员
             await notification_service.send_document(
                 chat_id, FSInputFile(temp_file, filename=file_name), caption=caption
             )
@@ -4716,6 +4757,15 @@ async def register_handlers():
     dp.message.register(cmd_workstart, Command("workstart"))
     dp.message.register(cmd_workend, Command("workend"))
     dp.message.register(cmd_admin, Command("admin"))
+
+    # ========== 固定活动命令处理器 ==========
+    dp.message.register(handle_fixed_activity, Command("wc"))
+    dp.message.register(handle_fixed_activity, Command("bigwc"))
+    dp.message.register(handle_fixed_activity, Command("eat"))
+    dp.message.register(handle_fixed_activity, Command("smoke"))
+    dp.message.register(handle_fixed_activity, Command("rest"))
+    # =======================================
+
     dp.message.register(cmd_export, Command("export"))
     dp.message.register(cmd_monthlyreport, Command("monthlyreport"))
     dp.message.register(cmd_exportmonthly, Command("exportmonthly"))
@@ -4742,8 +4792,6 @@ async def register_handlers():
     dp.message.register(cmd_setsoftresettime, Command("setsoftresettime"))
     dp.message.register(cmd_softresettime, Command("softresettime"))
     dp.message.register(cmd_fix_message_refs, Command("fixmessages"))
-    dp.message.register(cmd_ranking, Command("ranking"))
-    dp.message.register(cmd_myinfo, Command("myinfo"))
 
     # 按钮处理器
     dp.message.register(
@@ -4854,15 +4902,73 @@ async def keepalive_loop():
 
 
 # ========== 启动流程 ==========
+# 可回退版本
+# async def on_startup():
+#     """启动时执行 - 更新版本"""
+#     logger.info("🎯 机器人启动中...")
+#     try:
+#         # 删除webhook确保使用轮询模式（已在bot_manager中处理）
+#         # 初始化服务（已在main中调用initialize_services）
+#         logger.info("✅ 系统启动完成，准备接收消息")
+
+#         # 发送启动通知给管理员
+#         await send_startup_notification()
+
+#     except Exception as e:
+#         logger.error(f"启动过程异常: {e}")
+#         raise
+
+
 async def on_startup():
-    """启动时执行 - 更新版本"""
+    """启动时执行 - 包含固定活动打卡指令"""
     logger.info("🎯 机器人启动中...")
     try:
-        # 删除webhook确保使用轮询模式（已在bot_manager中处理）
-        # 初始化服务（已在main中调用initialize_services）
-        logger.info("✅ 系统启动完成，准备接收消息")
+        # 1. 定义【普通用户】固定活动菜单
+        user_commands = [
+            # 固定活动指令
+            BotCommand(command="wc", description="🚽 小厕"),
+            BotCommand(command="bigwc", description="🚻 大厕"),
+            BotCommand(command="eat", description="🍚 吃饭"),
+            BotCommand(command="smoke", description="🚬 抽烟"),
+            BotCommand(command="rest", description="🛌 休息"),
+            # 核心功能指令
+            BotCommand(command="workstart", description="🟢 上班打卡"),
+            BotCommand(command="workend", description="🔴 下班打卡"),
+            BotCommand(command="at", description="✅ 回座"),
+            # 查看功能
+            BotCommand(command="myinfo", description="📊 我的记录"),
+            BotCommand(command="ranking", description="🏆 排行榜"),
+            BotCommand(command="help", description="❓ 使用帮助"),
+        ]
 
-        # 发送启动通知给管理员
+        # 2. 定义【管理员】专属菜单（继承用户菜单并添加管理员功能）
+        admin_commands = user_commands + [
+            BotCommand(command="actstatus", description="📊 活跃活动统计"),
+            BotCommand(command="showsettings", description="⚙️ 查看系统配置"),
+            BotCommand(command="finesstatus", description="📈 罚款费率查询"),
+            BotCommand(command="worktime", description="⌚ 考勤时间设置"),
+            BotCommand(command="export", description="📤 导出今日报表"),
+            BotCommand(command="checkdb", description="🏥 数据库体检"),
+            BotCommand(command="adminhelp", description="🛠 管理员全指令指南"),
+        ]
+
+        logger.info(f"📋 要注册的命令列表: {[cmd.command for cmd in user_commands]}")
+        result = await bot_manager.bot.set_my_commands(commands=user_commands)
+        logger.info(f"✅ 命令注册结果: {result}")
+
+        # 3. 注册到 Telegram 服务器
+        # 注册默认菜单（所有人可见）
+        await bot_manager.bot.set_my_commands(commands=user_commands)
+        logger.info("✅ 普通用户指令菜单已同步")
+
+        # 覆盖管理员看到的菜单
+        await bot_manager.bot.set_my_commands(
+            commands=admin_commands, scope=BotCommandScopeAllChatAdministrators()
+        )
+        logger.info("✅ 管理员指令菜单已同步")
+
+        # 4. 原有逻辑保持不变
+        logger.info("✅ 系统启动完成，准备接收消息")
         await send_startup_notification()
 
     except Exception as e:
