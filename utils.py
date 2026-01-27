@@ -106,7 +106,7 @@ class MessageFormatter:
         """格式化打卡消息 - 改为新模板"""
         first_line = f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}"
         dashed_line = MessageFormatter.create_dashed_line()
-        
+
         message = (
             f"{first_line}\n"
             f"✅ 打卡成功：{MessageFormatter.format_copyable_text(activity)} - {MessageFormatter.format_copyable_text(time_str)}\n"
@@ -121,7 +121,7 @@ class MessageFormatter:
         message += (
             f"\n{dashed_line}\n"
             f"💡 操作提示\n"
-            f"完成后请及时点击 👉【✅ 回座打卡】👈按钮。"
+            f"完成后请及时点击 👉【✅ 回座】👈按钮。"
         )
 
         return message
@@ -144,10 +144,10 @@ class MessageFormatter:
         """格式化回座消息 - 改为新模板"""
         first_line = f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}"
         dashed_line = MessageFormatter.create_dashed_line()
-        
+
         # 今日次数从activity_counts中获取
         today_count = activity_counts.get(activity, 0)
-        
+
         # 构建消息
         message = (
             f"{first_line}\n"
@@ -159,7 +159,7 @@ class MessageFormatter:
             f"▫️ 累计时长：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
             f"▫️ 今日次数：{MessageFormatter.format_copyable_text(str(today_count))}次\n"
         )
-        
+
         # 超时罚款部分 - 改为新模板格式
         if is_overtime:
             overtime_time = MessageFormatter.format_time(int(overtime_seconds))
@@ -167,20 +167,20 @@ class MessageFormatter:
             message += f"▫️ 超时时长：{MessageFormatter.format_copyable_text(overtime_time)} 🚨\n"
             if fine_amount > 0:
                 message += f"▫️ 罚款金额：{MessageFormatter.format_copyable_text(str(fine_amount))}元 💸\n"
-        
+
         # 今日总计
         message += f"{dashed_line}\n"
         message += f"📊 今日总计\n"
         message += f"▫️ 活动详情\n"
-        
+
         # 添加活动详情 - 改为新模板格式
         for act, count in activity_counts.items():
             if count > 0:
                 message += f"   ➤ {MessageFormatter.format_copyable_text(act)}：{MessageFormatter.format_copyable_text(str(count))} 次 📝\n"
-        
+
         message += f"▫️ 总活动次数：{MessageFormatter.format_copyable_text(str(total_count))}次\n"
         message += f"▫️ 总活动时长：{MessageFormatter.format_copyable_text(total_time)}"
-        
+
         return message
 
     @staticmethod
@@ -1008,6 +1008,7 @@ def rate_limit(rate: int = 1, per: int = 1):
         return wrapper
 
     return decorator
+
 
 # ========== 重置通知函数 ==========
 async def send_reset_notification(
