@@ -106,7 +106,7 @@ class MessageFormatter:
         """格式化打卡消息 - 改为新模板"""
         first_line = f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}"
         dashed_line = MessageFormatter.create_dashed_line()
-
+        
         message = (
             f"{first_line}\n"
             f"✅ 打卡成功：{MessageFormatter.format_copyable_text(activity)} - {MessageFormatter.format_copyable_text(time_str)}\n"
@@ -119,9 +119,9 @@ class MessageFormatter:
             message += f"🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
 
         message += (
-            f"{dashed_line}\n"
+            f"\n{dashed_line}\n"
             f"💡 操作提示\n"
-            f"活动结束后请及时点击 👉【✅ 回座】👈按钮。"
+            f"完成后请及时点击 👉【✅ 回座打卡】👈按钮。"
         )
 
         return message
@@ -144,10 +144,10 @@ class MessageFormatter:
         """格式化回座消息 - 改为新模板"""
         first_line = f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}"
         dashed_line = MessageFormatter.create_dashed_line()
-
+        
         # 今日次数从activity_counts中获取
         today_count = activity_counts.get(activity, 0)
-
+        
         # 构建消息
         message = (
             f"{first_line}\n"
@@ -159,7 +159,7 @@ class MessageFormatter:
             f"▫️ 累计时长：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
             f"▫️ 今日次数：{MessageFormatter.format_copyable_text(str(today_count))}次\n"
         )
-
+        
         # 超时罚款部分 - 改为新模板格式
         if is_overtime:
             overtime_time = MessageFormatter.format_time(int(overtime_seconds))
@@ -167,20 +167,20 @@ class MessageFormatter:
             message += f"▫️ 超时时长：{MessageFormatter.format_copyable_text(overtime_time)} 🚨\n"
             if fine_amount > 0:
                 message += f"▫️ 罚款金额：{MessageFormatter.format_copyable_text(str(fine_amount))}元 💸\n"
-
+        
         # 今日总计
         message += f"{dashed_line}\n"
         message += f"📊 今日总计\n"
         message += f"▫️ 活动详情\n"
-
+        
         # 添加活动详情 - 改为新模板格式
         for act, count in activity_counts.items():
             if count > 0:
                 message += f"   ➤ {MessageFormatter.format_copyable_text(act)}：{MessageFormatter.format_copyable_text(str(count))} 次 📝\n"
-
+        
         message += f"▫️ 总活动次数：{MessageFormatter.format_copyable_text(str(total_count))}次\n"
         message += f"▫️ 总活动时长：{MessageFormatter.format_copyable_text(total_time)}"
-
+        
         return message
 
     @staticmethod
@@ -986,52 +986,28 @@ async def is_valid_checkin_time(
 
 # ========== 装饰器和工具函数 ==========
 def rate_limit(rate: int = 1, per: int = 1):
-    """速率限制装饰器 - 修复版（按用户ID隔离）"""
+    """速率限制装饰器"""
 
     def decorator(func):
-        user_calls: Dict[int, List[float]] = {}
+        calls = []
 
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            event = args[0] if args else None
-            uid = None
-
-            if isinstance(event, types.Message):
-                uid = event.from_user.id
-            elif isinstance(event, types.CallbackQuery):
-                uid = event.from_user.id
-
-            if not uid:
-                return await func(*args, **kwargs)
-
             now = time.time()
+            # 清理过期记录
+            calls[:] = [call for call in calls if now - call < per]
 
-            # ① 改动：用 setdefault，少一次 if 判断
-            calls = user_calls.setdefault(uid, [])
-
-            # ② 改动：就地清理，避免重新分配 list
-            calls[:] = [t for t in calls if now - t < per]
-
-            # ③ 改动：直接用 calls，避免重复 dict 索引
             if len(calls) >= rate:
-                if isinstance(event, types.Message):
-                    logger.debug(f"用户 {uid} 触发频率限制: {func.__name__}")
-                    await event.answer("⏳ 操作过于频繁，请稍后再试")
-                elif isinstance(event, types.CallbackQuery):
-                    await event.answer("⏳ 操作过于频繁，请稍后再试", show_alert=True)
+                if args and isinstance(args[0], types.Message):
+                    await args[0].answer("⏳ 操作过于频繁，请稍后再试")
                 return
 
             calls.append(now)
-
-            if len(user_calls) > 1000:
-                user_calls.clear()
-
             return await func(*args, **kwargs)
 
         return wrapper
 
     return decorator
-
 
 # ========== 重置通知函数 ==========
 async def send_reset_notification(
