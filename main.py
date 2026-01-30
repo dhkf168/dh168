@@ -4751,6 +4751,7 @@ async def initialize_services():
 
 async def check_services_health():
     """完整的服务健康检查"""
+
     health_status = {
         "database": await db.health_check(),
         "bot_manager_exists": bot_manager is not None,
@@ -4885,74 +4886,125 @@ async def external_keepalive():
             logger.debug(f"保活请求失败 {url}: {e}")
 
 
+# async def keepalive_loop():
+#     """Render 专用保活循环 - 防止免费服务休眠"""
+#     while True:
+#         try:
+#             # 🆕 每5分钟执行一次保活（Render 免费版15分钟不活动会休眠）
+#             await asyncio.sleep(300)
+
+#             current_time = get_beijing_time()
+#             logger.debug(
+#                 f"🔵 Render 保活检查: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+#             )
+
+#             # 1. 调用自己的健康检查端点
+#             try:
+
+#                 port = int(os.environ.get("PORT", 8080))
+#                 async with aiohttp.ClientSession(
+#                     timeout=aiohttp.ClientTimeout(total=10)
+#                 ) as session:
+#                     async with session.get(f"http://localhost:{port}/health") as resp:
+#                         if resp.status == 200:
+#                             logger.debug("✅ 内部健康检查保活成功")
+#             except Exception as e:
+#                 logger.warning(f"内部保活检查失败: {e}")
+
+#             # 2. 数据库连接保活
+#             try:
+#                 await db.connection_health_check()
+#                 logger.debug("✅ 数据库连接保活成功")
+#             except Exception as e:
+#                 logger.warning(f"数据库保活失败: {e}")
+
+#             # 3. 内存清理
+#             try:
+#                 await performance_optimizer.memory_cleanup()
+#                 # 🆕 强制垃圾回收
+
+#                 collected = gc.collect()
+#                 if collected > 0:
+#                     logger.debug(f"🧹 保活期间GC回收 {collected} 个对象")
+#             except Exception as e:
+#                 logger.debug(f"保活期间内存清理失败: {e}")
+
+#         except asyncio.CancelledError:
+#             break
+#         except Exception as e:
+#             logger.error(f"Render 保活循环异常: {e}")
+#             await asyncio.sleep(60)  # 异常后等待1分钟
+
+
 async def keepalive_loop():
-    """Render 专用保活循环 - 防止免费服务休眠"""
-    while True:
-        try:
-            # 🆕 每5分钟执行一次保活（Render 免费版15分钟不活动会休眠）
-            await asyncio.sleep(300)
 
-            current_time = get_beijing_time()
-            logger.debug(
-                f"🔵 Render 保活检查: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+    external_url = os.environ.get("RENDER_EXTERNAL_URL") or getattr(Config, "WEBHOOK_URL", None)
+    if external_url:
+        external_url = external_url.rstrip("/")
 
-            # 1. 调用自己的健康检查端点
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"🚀 保活循环启动 | 外部URL: {external_url or '未设置'} | 内部端口: {port}")
+
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=20),
+        headers={"User-Agent": "Bot-KeepAlive-Service"},
+    ) as session:
+
+        while True:
             try:
+                await asyncio.sleep(300)
 
-                port = int(os.environ.get("PORT", 8080))
-                async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as session:
-                    async with session.get(f"http://localhost:{port}/health") as resp:
-                        if resp.status == 200:
-                            logger.debug("✅ 内部健康检查保活成功")
+                # ------------------------
+                # 外部公网保活（核心）
+                # ------------------------
+                if external_url:
+                    try:
+                        async with session.get(f"{external_url}/health") as resp:
+                            if resp.status != 200:
+                                logger.warning(f"🌍 外部保活异常 | 状态码: {resp.status}")
+                    except Exception as e:
+                        logger.warning(f"🌍 外部保活失败: {e}")
+
+                # ------------------------
+                # 内部健康检查
+                # ------------------------
+                try:
+                    async with session.get(f"http://127.0.0.1:{port}/health") as resp:
+                        if resp.status != 200:
+                            logger.warning(f"🏠 内部健康检查异常 | 状态码: {resp.status}")
+                except Exception as e:
+                    logger.warning(f"🏠 内部健康检查失败: {e}")
+
+                # ------------------------
+                # 数据库连接保活
+                # ------------------------
+                try:
+                    if hasattr(db, "connection_health_check"):
+                        await db.connection_health_check()
+                except Exception as e:
+                    logger.warning(f"🗄️ 数据库保活异常: {e}")
+
+                # ------------------------
+                # 内存回收 (轻量日志)
+                # ------------------------
+                try:
+                    collected = gc.collect()
+                    if collected:
+                        logger.debug(f"🧹 GC 回收对象数: {collected}")
+                except Exception:
+                    pass
+
+            except asyncio.CancelledError:
+                logger.info("🛑 保活循环已取消")
+                break
             except Exception as e:
-                logger.warning(f"内部保活检查失败: {e}")
-
-            # 2. 数据库连接保活
-            try:
-                await db.connection_health_check()
-                logger.debug("✅ 数据库连接保活成功")
-            except Exception as e:
-                logger.warning(f"数据库保活失败: {e}")
-
-            # 3. 内存清理
-            try:
-                await performance_optimizer.memory_cleanup()
-                # 🆕 强制垃圾回收
-
-                collected = gc.collect()
-                if collected > 0:
-                    logger.debug(f"🧹 保活期间GC回收 {collected} 个对象")
-            except Exception as e:
-                logger.debug(f"保活期间内存清理失败: {e}")
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Render 保活循环异常: {e}")
-            await asyncio.sleep(60)  # 异常后等待1分钟
+                # 核心异常日志，保持循环继续
+                logger.error(f"⚠️ 保活循环遇到异常: {e}")
+                await asyncio.sleep(60)
 
 
-# ========== 启动流程 ==========
-# 可回退版本
-# async def on_startup():
-#     """启动时执行 - 更新版本"""
-#     logger.info("🎯 机器人启动中...")
-#     try:
-#         # 删除webhook确保使用轮询模式（已在bot_manager中处理）
-#         # 初始化服务（已在main中调用initialize_services）
-#         logger.info("✅ 系统启动完成，准备接收消息")
 
-#         # 发送启动通知给管理员
-#         await send_startup_notification()
-
-#     except Exception as e:
-#         logger.error(f"启动过程异常: {e}")
-#         raise
-
-
+# ========== 启动流程 =========
 async def on_startup():
     """启动时执行 - 包含固定活动打卡指令"""
     logger.info("🎯 机器人启动中...")
@@ -5138,13 +5190,9 @@ async def on_shutdown():
 #         polling_task.cancel()
 #         await on_shutdown()
 
+
 async def main():
     """全环境通用 - 工业级稳固版 (适配 Render/VPS/Docker)"""
-    import os
-    import asyncio
-    import sys
-    from contextlib import suppress
-
     # 1. 环境检测
     is_render = "RENDER" in os.environ
     health_server_site = None  # 用于存储健康服务器实例
@@ -5172,18 +5220,19 @@ async def main():
             asyncio.create_task(memory_cleanup_task(), name="memory_cleanup"),
             asyncio.create_task(health_monitoring_task(), name="health_monitor"),
         ]
-        
+
         # 针对 Render 的保活任务
         if is_render:
-            background_tasks.append(asyncio.create_task(keepalive_loop(), name="render_keepalive"))
+            background_tasks.append(
+                asyncio.create_task(keepalive_loop(), name="render_keepalive")
+            )
 
         # 5. 启动机器人逻辑
         await on_startup()
-        
+
         # 将 Polling 放入后台独立任务
         polling_task = asyncio.create_task(
-            bot_manager.start_polling_with_retry(),
-            name="telegram_polling"
+            bot_manager.start_polling_with_retry(), name="telegram_polling"
         )
 
         logger.info("🤖 机器人系统全功能已就绪")
@@ -5197,12 +5246,12 @@ async def main():
     except Exception as e:
         logger.error(f"❌ 系统运行异常: {e}")
         if is_render:
-            sys.exit(1) # 告诉 Render 启动失败，触发自动重启
+            sys.exit(1)  # 告诉 Render 启动失败，触发自动重启
     finally:
         logger.info("🛑 开始清理并优雅关闭...")
-        
+
         # A. 停止轮询
-        if 'polling_task' in locals():
+        if "polling_task" in locals():
             polling_task.cancel()
             with suppress(asyncio.CancelledError):
                 await polling_task
@@ -5214,10 +5263,10 @@ async def main():
                 logger.info("✅ 健康检查服务器已释放端口")
 
         # C. 停止所有后台任务
-        if 'background_tasks' in locals():
+        if "background_tasks" in locals():
             for task in background_tasks:
                 task.cancel()
-        
+
         # D. 执行统一的清理逻辑（关闭数据库等）
         await on_shutdown()
         logger.info("🎉 进程已安全结束")
