@@ -4642,20 +4642,27 @@ async def health_check(request):
 
 
 async def start_health_server():
-    """启动健康检查服务器"""
+    """启动一个简单的 HTTP 服务器供 Render 进行健康检查"""
+    # 核心：自动读取 Render 分配的端口，读取不到则默认用 10000 (本地测试用)
+    port = int(os.getenv("PORT", 10000)) 
+    
+    from aiohttp import web
     app = web.Application()
-    app.router.add_get("/", health_check)
-    app.router.add_get("/health", health_check)
-
+    
+    # 添加一个根路径处理函数，让监控工具（如 UptimeRobot）访问时能得到响应
+    async def handle(request):
+        return web.Response(text="Bot is running!", status=200)
+    
+    # 绑定根路径 /
+    app.router.add_get('/', handle)
+    
     runner = web.AppRunner(app)
     await runner.setup()
-
-    port = int(os.environ.get("PORT", Config.WEB_SERVER_CONFIG["PORT"]))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    
+    # 必须监听 0.0.0.0 而不是 127.0.0.1
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logger.info(f"Web server started on port {port}")
-
-    return site
+    logger.info(f"✅ 健康检查服务器已在端口 {port} 启动，并自动适配 Render 环境")
 
 
 # ========== 服务初始化 ==========
@@ -5097,3 +5104,4 @@ if __name__ == "__main__":
         logger.info("机器人已被用户中断")
     except Exception as e:
         logger.error(f"机器人运行异常: {e}")
+
