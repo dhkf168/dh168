@@ -1,11 +1,20 @@
 import asyncio
 import logging
 import sys
+import os
 import time
+import aiofiles
+import csv
+import json
+import re
+import gc
+import aiohttp
+import traceback
 from functools import wraps
 from datetime import datetime, timedelta, date
 from typing import Dict, Optional, List
 from contextlib import suppress
+from datetime import timedelta
 from aiogram.types import BotCommand, BotCommandScopeAllChatAdministrators
 
 
@@ -71,10 +80,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 
-import csv
-import os
+
 from io import StringIO
-import aiofiles
+
 
 # # 初始化bot
 # bot = Bot(token=Config.TOKEN)
@@ -1413,7 +1421,6 @@ async def send_overtime_notification_async(
 
     except Exception as e:
         logger.error(f"❌ 超时通知推送异常: {e}")
-        import traceback
 
         logger.error(f"完整堆栈：{traceback.format_exc()}")
 
@@ -2489,7 +2496,6 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
             user_activities = user_stat.get("activities", {})
             if isinstance(user_activities, str):
                 try:
-                    import json
 
                     user_activities = json.loads(user_activities)
                 except:
@@ -2538,7 +2544,6 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
 
     except Exception as e:
         logger.error(f"❌ 月度导出失败: {e}")
-        import traceback
 
         logger.error(traceback.format_exc())
         return None
@@ -2736,7 +2741,6 @@ async def cmd_setworktime(message: types.Message):
         work_end = args[2]
 
         # 验证时间格式
-        import re
 
         time_pattern = re.compile(r"^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$")
 
@@ -4380,8 +4384,6 @@ async def export_and_push_csv(
 
 
 # ========== 定时任务 ==========
-import asyncio
-from datetime import timedelta
 
 
 async def daily_reset_task():
@@ -4439,7 +4441,6 @@ async def daily_reset_task():
 
                 # 5. 发送通知
                 try:
-                    from utils import send_reset_notification
 
                     await send_reset_notification(chat_id, completion_result, now)
                 except Exception as e:
@@ -4644,23 +4645,22 @@ async def health_check(request):
 async def start_health_server():
     """启动一个简单的 HTTP 服务器供 Render 进行健康检查"""
     # 核心：自动读取 Render 分配的端口，读取不到则默认用 10000 (本地测试用)
-    port = int(os.getenv("PORT", 10000)) 
-    
-    from aiohttp import web
+    port = int(os.getenv("PORT", 10000))
+
     app = web.Application()
-    
+
     # 添加一个根路径处理函数，让监控工具（如 UptimeRobot）访问时能得到响应
     async def handle(request):
         return web.Response(text="Bot is running!", status=200)
-    
+
     # 绑定根路径 /
-    app.router.add_get('/', handle)
-    
+    app.router.add_get("/", handle)
+
     runner = web.AppRunner(app)
     await runner.setup()
-    
+
     # 必须监听 0.0.0.0 而不是 127.0.0.1
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(f"✅ 健康检查服务器已在端口 {port} 启动，并自动适配 Render 环境")
 
@@ -4899,7 +4899,6 @@ async def keepalive_loop():
 
             # 1. 调用自己的健康检查端点
             try:
-                import aiohttp
 
                 port = int(os.environ.get("PORT", 8080))
                 async with aiohttp.ClientSession(
@@ -4922,7 +4921,6 @@ async def keepalive_loop():
             try:
                 await performance_optimizer.memory_cleanup()
                 # 🆕 强制垃圾回收
-                import gc
 
                 collected = gc.collect()
                 if collected > 0:
@@ -5041,59 +5039,103 @@ async def on_shutdown():
         logger.error(f"关闭清理过程中出错: {e}")
 
 
+# async def main():
+#     """主函数 - Render 适配版"""
+#     # Render 环境检测
+#     is_render = os.environ.get("RENDER", False) or "RENDER" in os.environ
+
+#     if is_render:
+#         logger.info("🎯 检测到 Render 环境，应用优化配置")
+#         # 应用 Render 特定配置
+#         Config.DB_MAX_CONNECTIONS = 3
+#         Config.ENABLE_FILE_LOGGING = False
+
+#     try:
+#         logger.info("🚀 启动打卡机器人系统...")
+
+#         # 初始化服务
+#         await initialize_services()
+
+#         # 启动健康检查服务器（Render 必需）
+#         await start_health_server()
+
+#         # 🆕 Render 必需：更频繁的保活
+#         keepalive_task = asyncio.create_task(keepalive_loop(), name="render_keepalive")
+
+#         # 启动定时任务
+#         asyncio.create_task(daily_reset_task(), name="daily_reset")
+#         asyncio.create_task(soft_reset_task(), name="soft_reset")
+#         asyncio.create_task(memory_cleanup_task(), name="memory_cleanup")
+#         asyncio.create_task(health_monitoring_task(), name="health_monitoring")
+
+#         # 启动机器人
+#         logger.info("🤖 启动机器人（带自动重连机制）...")
+#         await on_startup()
+
+#         # 开始轮询
+#         await bot_manager.start_polling_with_retry()
+
+#     except KeyboardInterrupt:
+#         logger.info("🛑 机器人被用户中断")
+#     except Exception as e:
+#         logger.error(f"❌ 机器人启动失败: {e}")
+#         # 🆕 Render 环境下需要正常退出码
+#         if is_render:
+#             sys.exit(1)
+#         raise
+#     finally:
+#         # 🆕 确保保活任务被正确取消
+#         if "keepalive_task" in locals():
+#             keepalive_task.cancel()
+#             try:
+#                 await keepalive_task
+#             except asyncio.CancelledError:
+#                 pass
+
+#         await on_shutdown()
+
+
 async def main():
-    """主函数 - Render 适配版"""
-    # Render 环境检测
-    is_render = os.environ.get("RENDER", False) or "RENDER" in os.environ
+    """Render-safe 主函数（Polling 版）"""
+
+    is_render = "RENDER" in os.environ
 
     if is_render:
-        logger.info("🎯 检测到 Render 环境，应用优化配置")
-        # 应用 Render 特定配置
+        logger.info("🎯 Render 环境检测成功，启用安全模式")
         Config.DB_MAX_CONNECTIONS = 3
         Config.ENABLE_FILE_LOGGING = False
 
+    logger.info("🚀 启动打卡机器人系统（Render-safe polling 模式）")
+
+    # 1️⃣ 初始化
+    await initialize_services()
+
+    # 2️⃣ 启动健康检查服务器（必须最先）
+    await start_health_server()
+
+    # 3️⃣ 启动后台周期任务（允许失败，不影响主循环）
+    asyncio.create_task(daily_reset_task(), name="daily_reset")
+    asyncio.create_task(soft_reset_task(), name="soft_reset")
+    asyncio.create_task(memory_cleanup_task(), name="memory_cleanup")
+    asyncio.create_task(health_monitoring_task(), name="health_monitor")
+
+    # 4️⃣ 启动机器人（初始化）
+    await on_startup()
+
+    # 5️⃣ ⚠️ 关键：Polling 必须作为独立 Task
+    polling_task = asyncio.create_task(
+        bot_manager.start_polling_with_retry(), name="telegram_polling"
+    )
+
+    logger.info("🤖 Telegram polling 已启动（Render-safe）")
+
+    # 6️⃣ ⚠️ Render-safe 核心：主协程永远阻塞
+    # Render 只关心 HTTP 是否活着
     try:
-        logger.info("🚀 启动打卡机器人系统...")
-
-        # 初始化服务
-        await initialize_services()
-
-        # 启动健康检查服务器（Render 必需）
-        await start_health_server()
-
-        # 🆕 Render 必需：更频繁的保活
-        keepalive_task = asyncio.create_task(keepalive_loop(), name="render_keepalive")
-
-        # 启动定时任务
-        asyncio.create_task(daily_reset_task(), name="daily_reset")
-        asyncio.create_task(soft_reset_task(), name="soft_reset")
-        asyncio.create_task(memory_cleanup_task(), name="memory_cleanup")
-        asyncio.create_task(health_monitoring_task(), name="health_monitoring")
-
-        # 启动机器人
-        logger.info("🤖 启动机器人（带自动重连机制）...")
-        await on_startup()
-
-        # 开始轮询
-        await bot_manager.start_polling_with_retry()
-
-    except KeyboardInterrupt:
-        logger.info("🛑 机器人被用户中断")
-    except Exception as e:
-        logger.error(f"❌ 机器人启动失败: {e}")
-        # 🆕 Render 环境下需要正常退出码
-        if is_render:
-            sys.exit(1)
-        raise
+        await asyncio.Event().wait()
     finally:
-        # 🆕 确保保活任务被正确取消
-        if "keepalive_task" in locals():
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except asyncio.CancelledError:
-                pass
-
+        logger.info("🛑 Render 正在关闭实例，开始清理...")
+        polling_task.cancel()
         await on_shutdown()
 
 
@@ -5104,4 +5146,3 @@ if __name__ == "__main__":
         logger.info("机器人已被用户中断")
     except Exception as e:
         logger.error(f"机器人运行异常: {e}")
-
