@@ -4395,7 +4395,7 @@ async def export_and_push_csv(
         writer = csv.writer(csv_buffer)
 
         # 构建完整表头（第一个代码的逻辑）
-        headers = ["用户ID", "用户昵称", "重置类型"]
+        headers = ["用户ID", "用户昵称", "班次"]
         activity_names = sorted(activity_limits.keys())  # 排序确保一致性
         for act in activity_names:
             headers.extend([f"{act}次数", f"{act}总时长"])
@@ -4586,7 +4586,7 @@ async def export_and_push_csv(
             f"📅 统计日期：<code>{display_date}</code>\n"
             f"⏰ 导出时间：<code>{beijing_now.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
             f"{dashed_line}\n"
-            f"💾 <i>包含每个用户每日的活动统计及工作时长</i>"
+            f"💾 包含每个用户每日的活动统计及工作时长"
         )
 
         # ========== 12. 发送到当前群组 ==========
