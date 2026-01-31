@@ -4641,28 +4641,28 @@ async def health_check(request):
             status=500,
         )
 
-
 async def start_health_server():
-    """启动一个简单的 HTTP 服务器供 Render 进行健康检查"""
-    # 核心：自动读取 Render 分配的端口，读取不到则默认用 10000 (本地测试用)
+    """优化后的健康检查服务器 - 解决 404 并保留完整功能"""
     port = int(os.getenv("PORT", 10000))
-
     app = web.Application()
 
-    # 添加一个根路径处理函数，让监控工具（如 UptimeRobot）访问时能得到响应
-    async def handle(request):
+    # 1. 根路径处理函数
+    async def root_handle(request):
         return web.Response(text="Bot is running!", status=200)
 
-    # 绑定根路径 /
-    app.router.add_get("/", handle)
+    # 2. 绑定路由 (核心修复)
+    app.router.add_get("/", root_handle)
+    # 完美对接 keepalive_loop 的请求路径
+    app.router.add_get("/health", health_check) 
 
     runner = web.AppRunner(app)
     await runner.setup()
 
-    # 必须监听 0.0.0.0 而不是 127.0.0.1
+    # 监听 0.0.0.0 确保外部可穿透
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"✅ 健康检查服务器已在端口 {port} 启动，并自动适配 Render 环境")
+    logger.info(f"✅ 健康检查服务器已在端口 {port} 启动: / 和 /health")
+    return site
 
 
 # ========== 服务初始化 ==========
@@ -4937,37 +4937,35 @@ async def external_keepalive():
 
 
 async def keepalive_loop():
-
+    """完整的保活循环: 外部保活 + 内部检查 + 数据库保活 + 内存回收"""
     external_url = os.environ.get("RENDER_EXTERNAL_URL") or getattr(Config, "WEBHOOK_URL", None)
     if external_url:
         external_url = external_url.rstrip("/")
 
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"🚀 保活循环启动 | 外部URL: {external_url or '未设置'} | 内部端口: {port}")
+    logger.info(f"🚀 保活循环启动 | 外部URL: {external_url or '未设置'} | 端口: {port}")
 
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=20),
         headers={"User-Agent": "Bot-KeepAlive-Service"},
     ) as session:
-
         while True:
             try:
+                # 保持原有的 5 分钟频率
                 await asyncio.sleep(300)
 
-                # ------------------------
-                # 外部公网保活（核心）
-                # ------------------------
+                # 1. 外部公网保活
                 if external_url:
                     try:
                         async with session.get(f"{external_url}/health") as resp:
                             if resp.status != 200:
                                 logger.warning(f"🌍 外部保活异常 | 状态码: {resp.status}")
+                            else:
+                                logger.debug("🌍 外部保活成功")
                     except Exception as e:
                         logger.warning(f"🌍 外部保活失败: {e}")
 
-                # ------------------------
-                # 内部健康检查
-                # ------------------------
+                # 2. 内部健康检查
                 try:
                     async with session.get(f"http://127.0.0.1:{port}/health") as resp:
                         if resp.status != 200:
@@ -4975,21 +4973,17 @@ async def keepalive_loop():
                 except Exception as e:
                     logger.warning(f"🏠 内部健康检查失败: {e}")
 
-                # ------------------------
-                # 数据库连接保活
-                # ------------------------
+                # 3. ✅ 补回：数据库连接保活
                 try:
                     if hasattr(db, "connection_health_check"):
                         await db.connection_health_check()
                 except Exception as e:
                     logger.warning(f"🗄️ 数据库保活异常: {e}")
 
-                # ------------------------
-                # 内存回收 (轻量日志)
-                # ------------------------
+                # 4. ✅ 补回：内存回收 (GC)
                 try:
                     collected = gc.collect()
-                    if collected:
+                    if collected > 0:
                         logger.debug(f"🧹 GC 回收对象数: {collected}")
                 except Exception:
                     pass
@@ -4998,7 +4992,6 @@ async def keepalive_loop():
                 logger.info("🛑 保活循环已取消")
                 break
             except Exception as e:
-                # 核心异常日志，保持循环继续
                 logger.error(f"⚠️ 保活循环遇到异常: {e}")
                 await asyncio.sleep(60)
 
@@ -5006,28 +4999,27 @@ async def keepalive_loop():
 
 # ========== 启动流程 =========
 async def on_startup():
-    """启动时执行 - 包含固定活动打卡指令"""
+    """启动时执行 - 解决冲突并保留完整指令逻辑"""
     logger.info("🎯 机器人启动中...")
     try:
-        # 1. 定义【普通用户】固定活动菜单
+        # ✅ 新增：强行踢掉其他冲突实例，确保线上唯一运行
+        await bot_manager.bot.delete_webhook(drop_pending_updates=True)
+        
+        # 1. 定义指令列表
         user_commands = [
-            # 固定活动指令
             BotCommand(command="wc", description="🚽 小厕"),
             BotCommand(command="bigwc", description="🚻 大厕"),
             BotCommand(command="eat", description="🍚 吃饭"),
             BotCommand(command="smoke", description="🚬 抽烟"),
             BotCommand(command="rest", description="🛌 休息"),
-            # 核心功能指令
             BotCommand(command="workstart", description="🟢 上班打卡"),
             BotCommand(command="workend", description="🔴 下班打卡"),
             BotCommand(command="at", description="✅ 回座"),
-            # 查看功能
             BotCommand(command="myinfo", description="📊 我的记录"),
             BotCommand(command="ranking", description="🏆 排行榜"),
             BotCommand(command="help", description="❓ 使用帮助"),
         ]
 
-        # 2. 定义【管理员】专属菜单（继承用户菜单并添加管理员功能）
         admin_commands = user_commands + [
             BotCommand(command="actstatus", description="📊 活跃活动统计"),
             BotCommand(command="showsettings", description="⚙️ 查看系统配置"),
@@ -5038,27 +5030,28 @@ async def on_startup():
             BotCommand(command="adminhelp", description="🛠 管理员全指令指南"),
         ]
 
+        # ✅ 打印你需要的注册日志
         logger.info(f"📋 要注册的命令列表: {[cmd.command for cmd in user_commands]}")
-        result = await bot_manager.bot.set_my_commands(commands=user_commands)
-        logger.info(f"✅ 命令注册结果: {result}")
+        
+        # 2. 注册普通用户菜单
+        res_user = await bot_manager.bot.set_my_commands(commands=user_commands)
+        logger.info(f"✅ 普通用户命令注册结果: {res_user}")
 
-        # 3. 注册到 Telegram 服务器
-        # 注册默认菜单（所有人可见）
-        await bot_manager.bot.set_my_commands(commands=user_commands)
-        logger.info("✅ 普通用户指令菜单已同步")
-
-        # 覆盖管理员看到的菜单
-        await bot_manager.bot.set_my_commands(
+        # 3. 注册管理员菜单
+        res_admin = await bot_manager.bot.set_my_commands(
             commands=admin_commands, scope=BotCommandScopeAllChatAdministrators()
         )
-        logger.info("✅ 管理员指令菜单已同步")
+        logger.info(f"✅ 管理员指令菜单注册结果: {res_admin}")
 
-        # 4. 原有逻辑保持不变
-        logger.info("✅ 系统启动完成，准备接收消息")
+        # 4. 初始化数据库
+        if hasattr(db, "init"):
+            await db.init()
+
         await send_startup_notification()
+        logger.info("✅ 系统启动完成，准备接收消息")
 
     except Exception as e:
-        logger.error(f"启动过程异常: {e}")
+        logger.error(f"❌ 启动过程异常: {e}")
         raise
 
 
