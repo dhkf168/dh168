@@ -32,7 +32,7 @@ class PostgreSQLDatabase:
         self._maintenance_task = None
         self._connection_maintenance_task = None
 
-        self._cache_max_size = 10000
+        self._cache_max_size = 1000
         self._cache_access_order = []
 
     # ========== 重连机制 ==========
@@ -635,7 +635,7 @@ class PostgreSQLDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_work_records_main ON work_records (chat_id, user_id, record_date)",
                 "CREATE INDEX IF NOT EXISTS idx_users_main ON users (chat_id, user_id)",
                 "CREATE INDEX IF NOT EXISTS idx_monthly_stats_main ON monthly_statistics (chat_id, user_id, statistic_date)",
-                "CREATE INDEX IF NOT EXISTS idx_daily_stats_main ON daily_statistics (chat_id, user_id, record_date, activity_name, is_soft_reset)"
+                "CREATE INDEX IF NOT EXISTS idx_daily_stats_main ON daily_statistics (chat_id, user_id, record_date, activity_name, is_soft_reset)",
                 "CREATE INDEX IF NOT EXISTS idx_work_records_group_date ON work_records (chat_id, record_date)",
                 "CREATE INDEX IF NOT EXISTS idx_daily_stats_group_date ON daily_statistics (chat_id, record_date)",
                 "CREATE INDEX IF NOT EXISTS idx_activities_created_at ON user_activities (created_at)",
@@ -2651,7 +2651,7 @@ class PostgreSQLDatabase:
     async def get_group_statistics(
         self, chat_id: int, target_date: Optional[date] = None
     ) -> List[Dict]:
-        """获取群组统计信息 - 稳定终版：修复罚款统计口径 + 完整数据逻辑"""
+        """获取群组统计信息 - 修复版：正确使用 is_soft_reset 字段"""
 
         if target_date is None:
             target_date = await self.get_business_date(chat_id)
@@ -2663,24 +2663,23 @@ class PostgreSQLDatabase:
                 WITH user_stats AS (
                     SELECT 
                         ds.user_id,
-                        u.nickname,
+                        ds.is_soft_reset,  -- 🟢 使用现有的布尔字段
+                        MAX(u.nickname) as nickname,
 
-                        -- 1. 活动统计（排除特殊统计行和软重置标记）
+                        -- 1. 活动统计（排除特殊统计行，但保留软重置标记的 activity_name）
                         SUM(CASE WHEN ds.activity_name NOT IN (
                             'work_days','work_hours',
                             'work_fines','work_start_fines','work_end_fines',
-                            'overtime_count','overtime_time','total_fines',
-                            'soft_reset'
+                            'overtime_count','overtime_time','total_fines'
                         ) THEN ds.activity_count ELSE 0 END) AS total_activity_count,
 
                         SUM(CASE WHEN ds.activity_name NOT IN (
                             'work_days','work_hours',
                             'work_fines','work_start_fines','work_end_fines',
-                            'overtime_count','overtime_time','total_fines',
-                            'soft_reset'
+                            'overtime_count','overtime_time','total_fines'
                         ) THEN ds.accumulated_time ELSE 0 END) AS total_accumulated_time,
 
-                        -- 2. 修复：罚款统计 (从 accumulated_time 获取特定行的值，而非 fine_amount 列)
+                        -- 2. 罚款统计
                         SUM(CASE WHEN ds.activity_name IN (
                             'total_fines', 
                             'work_fines', 
@@ -2689,8 +2688,10 @@ class PostgreSQLDatabase:
                         ) THEN ds.accumulated_time ELSE 0 END) AS total_fines,
 
                         -- 3. 超时统计
-                        SUM(CASE WHEN ds.activity_name = 'overtime_count' THEN ds.activity_count ELSE 0 END) AS overtime_count,
-                        SUM(CASE WHEN ds.activity_name = 'overtime_time' THEN ds.accumulated_time ELSE 0 END) AS total_overtime_time
+                        SUM(CASE WHEN ds.activity_name = 'overtime_count'
+                                 THEN ds.activity_count ELSE 0 END) AS overtime_count,
+                        SUM(CASE WHEN ds.activity_name = 'overtime_time'
+                                 THEN ds.accumulated_time ELSE 0 END) AS total_overtime_time
 
                     FROM daily_statistics ds
                     LEFT JOIN users u 
@@ -2698,12 +2699,13 @@ class PostgreSQLDatabase:
                        AND ds.user_id = u.user_id
                     WHERE ds.chat_id = $1 
                       AND ds.record_date = $2
-                    GROUP BY ds.user_id, u.nickname
+                    GROUP BY ds.user_id, ds.is_soft_reset
                 ),
 
                 activity_details AS (
                     SELECT
                         ds.user_id,
+                        ds.is_soft_reset,
                         ds.activity_name,
                         SUM(ds.activity_count) AS total_count,
                         SUM(ds.accumulated_time) AS total_time
@@ -2713,22 +2715,24 @@ class PostgreSQLDatabase:
                       AND ds.activity_name NOT IN (
                             'work_days','work_hours',
                             'work_fines','work_start_fines','work_end_fines',
-                            'overtime_count','overtime_time','total_fines',
-                            'soft_reset'
+                            'overtime_count','overtime_time','total_fines'
                       )
-                    GROUP BY ds.user_id, ds.activity_name
+                    GROUP BY ds.user_id, ds.is_soft_reset, ds.activity_name
                 ),
 
                 work_stats AS (
                     SELECT
                         ds.user_id,
-                        MAX(CASE WHEN ds.activity_name = 'work_days' THEN ds.activity_count ELSE 0 END) AS work_days,
-                        MAX(CASE WHEN ds.activity_name = 'work_hours' THEN ds.accumulated_time ELSE 0 END) AS work_hours
+                        ds.is_soft_reset,
+                        MAX(CASE WHEN ds.activity_name = 'work_days'
+                                 THEN ds.activity_count ELSE 0 END) AS work_days,
+                        MAX(CASE WHEN ds.activity_name = 'work_hours'
+                                 THEN ds.accumulated_time ELSE 0 END) AS work_hours
                     FROM daily_statistics ds
                     WHERE ds.chat_id = $1 
                       AND ds.record_date = $2
                       AND ds.activity_name IN ('work_days','work_hours')
-                    GROUP BY ds.user_id
+                    GROUP BY ds.user_id, ds.is_soft_reset
                 )
 
                 SELECT 
@@ -2745,13 +2749,19 @@ class PostgreSQLDatabase:
                     ) FILTER (WHERE ad.activity_name IS NOT NULL) AS activities
 
                 FROM user_stats us
-                LEFT JOIN activity_details ad ON us.user_id = ad.user_id
-                LEFT JOIN work_stats ws ON us.user_id = ws.user_id
-                GROUP BY us.user_id, us.nickname,
+                LEFT JOIN activity_details ad
+                    ON us.user_id = ad.user_id
+                   AND us.is_soft_reset = ad.is_soft_reset
+                LEFT JOIN work_stats ws
+                    ON us.user_id = ws.user_id
+                   AND us.is_soft_reset = ws.is_soft_reset
+
+                GROUP BY us.user_id, us.is_soft_reset, us.nickname,
                          us.total_activity_count, us.total_accumulated_time,
                          us.total_fines, us.overtime_count, us.total_overtime_time,
                          ws.work_days, ws.work_hours
-                ORDER BY us.total_accumulated_time DESC
+
+                ORDER BY us.user_id ASC, us.is_soft_reset ASC
                 """,
                 chat_id,
                 target_date,
@@ -2764,7 +2774,19 @@ class PostgreSQLDatabase:
                 data["work_days"] = data.pop("final_work_days", 0)
                 data["work_hours"] = data.pop("final_work_hours", 0)
 
-                # JSON 稳定解析
+                # 确保布尔值转换
+                is_soft_reset = data.get("is_soft_reset", False)
+                if isinstance(is_soft_reset, str):
+                    data["is_soft_reset"] = is_soft_reset.lower() in (
+                        "true",
+                        "t",
+                        "1",
+                        "yes",
+                    )
+                else:
+                    data["is_soft_reset"] = bool(is_soft_reset)
+
+                # JSON 解析
                 raw_activities = data.get("activities")
                 parsed_activities = {}
 
@@ -2773,14 +2795,22 @@ class PostgreSQLDatabase:
                         try:
                             parsed_activities = json.loads(raw_activities)
                         except Exception as e:
-                            logger.error(f"JSON解析失败: {e}")
+                            self.logger.error(f"JSON解析失败: {e}")
                     elif isinstance(raw_activities, dict):
                         parsed_activities = raw_activities
 
                 data["activities"] = parsed_activities
 
+                # 🟢 调试日志
+                logger.debug(
+                    f"用户 {data['user_id']} 重置状态: {data['is_soft_reset']}, "
+                    f"活动数: {data['total_activity_count']}, "
+                    f"时长: {data['total_accumulated_time']}"
+                )
+
                 result.append(data)
 
+            logger.info(f"数据库查询返回 {len(result)} 条记录（含软硬重置区分）")
             return result
 
     async def get_all_groups(self) -> List[int]:
