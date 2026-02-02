@@ -30,8 +30,8 @@ class Config:
 
     # 数据库配置
     DATABASE_URL = os.getenv("DATABASE_URL", "")
-    DB_MIN_CONNECTIONS = int(os.getenv("DB_MIN_CONNECTIONS", "1"))
-    DB_MAX_CONNECTIONS = int(os.getenv("DB_MAX_CONNECTIONS", "5"))
+    DB_MIN_CONNECTIONS = int(os.getenv("DB_MIN_CONNECTIONS", "3"))
+    DB_MAX_CONNECTIONS = int(os.getenv("DB_MAX_CONNECTIONS", "10"))
     DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
     DB_CONNECTION_TIMEOUT = int(os.getenv("DB_CONNECTION_TIMEOUT", "60"))
     DB_HEALTH_CHECK_INTERVAL = int(os.getenv("DB_HEALTH_CHECK_INTERVAL", "30"))
@@ -53,7 +53,7 @@ class Config:
         "小厕": {"max_times": 10, "time_limit": 5},
         "大厕": {"max_times": 5, "time_limit": 15},
         "吃饭": {"max_times": 3, "time_limit": 35},
-        "抽烟": {"max_times": 5, "time_limit": 10},
+        "抽烟或休息": {"max_times": 5, "time_limit": 10},
     }
 
     # 默认罚款配置
@@ -61,7 +61,7 @@ class Config:
         "小厕": {"30min": 100, "60min": 200, "120min": 500},
         "大厕": {"30min": 100, "60min": 200, "120min": 500},
         "吃饭": {"30min": 100, "60min": 200, "120min": 500},
-        "抽烟": {"30min": 100, "60min": 200, "120min": 500},
+        "抽烟或休息": {"30min": 100, "60min": 200, "120min": 500},
     }
 
     # 默认上下班罚款配置
