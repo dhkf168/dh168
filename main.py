@@ -1088,6 +1088,36 @@ async def start_activity(message: types.Message, act: str):
 
         logger.info(f"📝 用户 {uid} 开始活动 {act}，消息ID: {sent_message.message_id}")
 
+        # ==================== ✨ 新增功能开始：吃饭推送 ✨ ====================
+        if act == "吃饭":
+            try:
+                # 获取群名（用于通知显示）
+                chat_title = str(chat_id)
+                try:
+                    chat_info = await bot.get_chat(chat_id)
+                    chat_title = chat_info.title or chat_title
+                except Exception:
+                    pass
+
+                # 构建推送文案
+                eat_notification_text = (
+                    f"🍽️ <b>吃饭通知</b>\n"
+                    f" {MessageFormatter.format_user_link(uid, name)} 去吃饭了\n"
+                    f"⏰ 吃饭时间：<code>{now.strftime('%H:%M:%S')}</code>\n"
+                )
+
+                # 使用现有的 notification_service 异步发送
+                # 它会自动判断是否绑定了频道/群组并进行推送
+                asyncio.create_task(
+                    notification_service.send_notification(
+                        chat_id, eat_notification_text
+                    )
+                )
+                logger.info(f"🍽️ 已触发用户 {uid} 的吃饭推送")
+
+            except Exception as e:
+                logger.error(f"❌ 吃饭推送失败: {e}")
+
 
 # ========== 回座功能 ==========
 async def process_back(message: types.Message):
@@ -1298,6 +1328,44 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
                     chat_id, uid, notification_user_data, act, fine_amount, now
                 )
             )
+
+        # ==================== ✨ 吃饭回座推送 (优化版) ✨ ====================
+        if act == "吃饭":
+            try:
+                # 1. 获取群名
+                chat_title = str(chat_id)
+                try:
+                    chat_info = await message.bot.get_chat(chat_id)
+                    chat_title = chat_info.title or chat_title
+                except Exception:
+                    pass
+
+                # 2. 构建推送文案
+                # 使用已经计算好的 elapsed_time_str (例如 "15分30秒")
+                eat_end_notification_text = (
+                    f"🍽️ <b>吃饭结束通知</b>\n"
+                    f"{MessageFormatter.format_user_link(uid, user_data.get('nickname', '用户'))} 回来了\n"
+                    f"⏱️ 吃饭耗时：<code>{elapsed_time_str}</code>\n"
+                )
+
+                # 如果有超时或罚款，也可以加进去
+                # if is_overtime:
+                #     eat_end_notification_text += (
+                #         f"⚠️ 状态：超时 (罚款 {fine_amount}元)\n"
+                #     )
+                # else:
+                #     eat_end_notification_text += f"✅ 状态：正常\n"
+
+                # 3. 异步发送
+                asyncio.create_task(
+                    notification_service.send_notification(
+                        chat_id, eat_end_notification_text
+                    )
+                )
+                logger.info(f"🍽️ 已触发用户 {uid} 的吃饭回座推送")
+
+            except Exception as e:
+                logger.error(f"❌ 吃饭回座推送失败: {e}")
 
     except Exception as e:
         logger.error(f"回座处理异常: {e}")
@@ -4395,7 +4463,7 @@ async def export_and_push_csv(
         writer = csv.writer(csv_buffer)
 
         # 构建完整表头（第一个代码的逻辑）
-        headers = ["用户ID", "用户昵称", "班次"]
+        headers = ["用户ID", "用户昵称", "重置类型"]
         activity_names = sorted(activity_limits.keys())  # 排序确保一致性
         for act in activity_names:
             headers.extend([f"{act}次数", f"{act}总时长"])
@@ -4586,7 +4654,7 @@ async def export_and_push_csv(
             f"📅 统计日期：<code>{display_date}</code>\n"
             f"⏰ 导出时间：<code>{beijing_now.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
             f"{dashed_line}\n"
-            f"💾 包含每个用户每日的活动统计及工作时长"
+            f"💾 <i>包含每个用户每日的活动统计及工作时长</i>"
         )
 
         # ========== 12. 发送到当前群组 ==========
