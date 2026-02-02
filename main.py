@@ -1912,6 +1912,16 @@ async def cmd_ci(message: types.Message):
         return
 
     act = args[1].strip()
+
+    activity_aliases = {
+        "抽烟": "抽烟或休息",
+        "休息": "抽烟或休息",
+        "smoke": "抽烟或休息",
+        "吸烟": "抽烟或休息",
+    }
+    if act in activity_aliases:
+        act = activity_aliases[act]
+
     if not await db.activity_exists(act):
         await message.answer(
             f"❌ 活动 '<code>{act}</code>' 不存在，请先使用 /addactivity 添加或检查拼写",
@@ -3920,7 +3930,7 @@ async def handle_fixed_activity(message: types.Message):
         "/wc": "小厕",
         "/bigwc": "大厕",
         "/eat": "吃饭",
-        "/smoke": "抽烟",
+        "/smoke": "抽烟或休息",
         "/rest": "休息",
     }
 
