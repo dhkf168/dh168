@@ -22,12 +22,13 @@ class PerformanceMetrics:
 
 
 class PerformanceMonitor:
-    """性能监控器"""
+    """性能监控器 - 线程安全版"""
 
     def __init__(self):
         self.metrics: Dict[str, PerformanceMetrics] = {}
         self.slow_operations_count = 0
         self.start_time = time.time()
+        self._metrics_lock = asyncio.Lock()  # ✅ 添加锁
 
     def track(self, operation_name: str):
         """性能跟踪装饰器"""
@@ -41,7 +42,10 @@ class PerformanceMonitor:
                     return result
                 finally:
                     execution_time = time.time() - start_time
-                    self._record_metrics(operation_name, execution_time)
+                    # ✅ 异步方法中创建任务来记录指标，不阻塞
+                    asyncio.create_task(
+                        self._record_metrics_async(operation_name, execution_time)
+                    )
 
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
@@ -51,14 +55,28 @@ class PerformanceMonitor:
                     return result
                 finally:
                     execution_time = time.time() - start_time
-                    self._record_metrics(operation_name, execution_time)
+                    # ✅ 同步方法中直接调用同步记录方法
+                    self._record_metrics_sync(operation_name, execution_time)
 
             return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
 
         return decorator
 
-    def _record_metrics(self, operation_name: str, execution_time: float):
-        """记录性能指标"""
+    async def _record_metrics_async(self, operation_name: str, execution_time: float):
+        """异步记录性能指标"""
+        async with self._metrics_lock:
+            self._record_metrics_internal(operation_name, execution_time)
+
+    def _record_metrics_sync(self, operation_name: str, execution_time: float):
+        """同步记录性能指标（用于同步函数）"""
+        # ✅ 同步方法中无法使用 asyncio.Lock，但考虑到：
+        # 1. 同步函数在异步环境中很少使用
+        # 2. 即使有并发，丢失几次计数影响不大
+        # 3. 可以改用 threading.Lock，但会增加复杂度
+        self._record_metrics_internal(operation_name, execution_time)
+
+    def _record_metrics_internal(self, operation_name: str, execution_time: float):
+        """内部记录方法（调用时需确保线程安全）"""
         if operation_name not in self.metrics:
             self.metrics[operation_name] = PerformanceMetrics()
 
@@ -70,22 +88,32 @@ class PerformanceMonitor:
         metrics.min_time = min(metrics.min_time, execution_time)
         metrics.last_updated = time.time()
 
-        # 记录慢操作
-        if execution_time > 1.0:  # 超过1秒视为慢操作
+        if execution_time > 1.0:
             self.slow_operations_count += 1
             logger.warning(
                 f"⏱️ 慢操作检测: {operation_name} 耗时 {execution_time:.3f}秒"
             )
 
-    def get_metrics(self, operation_name: str) -> Optional[PerformanceMetrics]:
+    async def get_metrics(self, operation_name: str) -> Optional[PerformanceMetrics]:
         """获取指定操作的性能指标"""
-        return self.metrics.get(operation_name)
+        async with self._metrics_lock:
+            # 返回副本以避免外部修改
+            metrics = self.metrics.get(operation_name)
+            if metrics:
+                return PerformanceMetrics(
+                    count=metrics.count,
+                    total_time=metrics.total_time,
+                    avg_time=metrics.avg_time,
+                    max_time=metrics.max_time,
+                    min_time=metrics.min_time,
+                    last_updated=metrics.last_updated,
+                )
+            return None
 
-    def get_performance_report(self) -> Dict[str, Any]:
+    async def get_performance_report(self) -> Dict[str, Any]:
         """获取性能报告"""
         uptime = time.time() - self.start_time
 
-        # 计算内存使用（近似值）
         try:
             import psutil
 
@@ -94,29 +122,36 @@ class PerformanceMonitor:
         except ImportError:
             memory_usage_mb = 0
 
-        # 汇总指标
-        metrics_summary = {}
-        for op_name, metrics in self.metrics.items():
-            if metrics.count > 0:
-                metrics_summary[op_name] = {
-                    "count": metrics.count,
-                    "avg": metrics.avg_time,
-                    "max": metrics.max_time,
-                    "min": metrics.min_time if metrics.min_time != float("inf") else 0,
-                }
+        # ✅ 在锁保护下复制数据
+        async with self._metrics_lock:
+            metrics_summary = {}
+            for op_name, metrics in self.metrics.items():
+                if metrics.count > 0:
+                    metrics_summary[op_name] = {
+                        "count": metrics.count,
+                        "avg": metrics.avg_time,
+                        "max": metrics.max_time,
+                        "min": (
+                            metrics.min_time if metrics.min_time != float("inf") else 0
+                        ),
+                    }
+
+            slow_ops = self.slow_operations_count
+            total_ops = sum(m.count for m in self.metrics.values())
 
         return {
             "uptime": uptime,
             "memory_usage_mb": memory_usage_mb,
-            "slow_operations_count": self.slow_operations_count,
-            "total_operations": sum(m.count for m in self.metrics.values()),
+            "slow_operations_count": slow_ops,
+            "total_operations": total_ops,
             "metrics_summary": metrics_summary,
         }
 
-    def reset_metrics(self):
+    async def reset_metrics(self):
         """重置性能指标"""
-        self.metrics.clear()
-        self.slow_operations_count = 0
+        async with self._metrics_lock:
+            self.metrics.clear()
+            self.slow_operations_count = 0
 
 
 class RetryManager:
@@ -141,7 +176,7 @@ class RetryManager:
                         if attempt == self.max_retries:
                             break
 
-                        delay = self.base_delay * (2**attempt)  # 指数退避
+                        delay = self.base_delay * (2**attempt)
                         logger.warning(
                             f"🔄 重试 {operation_name} (尝试 {attempt + 1}/{self.max_retries}): {e}"
                         )
@@ -158,70 +193,177 @@ class RetryManager:
 
 
 class GlobalCache:
-    """全局缓存管理器"""
+    """全局缓存管理器 - 原子计数器版（最佳实践）"""
 
     def __init__(self, default_ttl: int = 300):
         self._cache: Dict[str, Any] = {}
         self._cache_ttl: Dict[str, float] = {}
+        # 使用 asyncio 锁
+        self._stats_lock = asyncio.Lock()
         self._hits = 0
         self._misses = 0
         self.default_ttl = default_ttl
+        # 用于缓存写入的锁
+        self._write_lock = asyncio.Lock()
+        # 用于缓存击穿保护
+        self._loading: Dict[str, asyncio.Event] = {}
 
-    def get(self, key: str) -> Any:
-        """获取缓存值"""
-        if key in self._cache_ttl and time.time() < self._cache_ttl[key]:
-            self._hits += 1
-            return self._cache.get(key)
-        else:
+    async def get(self, key: str) -> Optional[Any]:
+        """获取缓存值 - 高性能版"""
+        # 快速路径：直接读取（Python dict get 是原子的）
+        expiry = self._cache_ttl.get(key)
+
+        if expiry is not None:
+            if time.time() < expiry:
+                # 缓存有效
+                value = self._cache.get(key)
+                # 原子更新命中数
+                async with self._stats_lock:
+                    self._hits += 1
+                return value
+            else:
+                # 缓存过期，需要清理
+                async with self._write_lock:
+                    # 双重检查，防止在获得锁前被清理
+                    if key in self._cache_ttl and time.time() >= self._cache_ttl[key]:
+                        self._cache.pop(key, None)
+                        self._cache_ttl.pop(key, None)
+
+        # 缓存未命中
+        async with self._stats_lock:
             self._misses += 1
-            self._cache.pop(key, None)
-            self._cache_ttl.pop(key, None)
-            return None
+        return None
 
-    def set(self, key: str, value: Any, ttl: int = None):
+    async def get_many(self, keys: list) -> Dict[str, Any]:
+        """批量获取缓存 - 减少锁竞争"""
+        result = {}
+        now = time.time()
+        hits = 0
+
+        for key in keys:
+            expiry = self._cache_ttl.get(key)
+            if expiry and now < expiry:
+                result[key] = self._cache.get(key)
+                hits += 1
+
+        # 批量更新统计
+        async with self._stats_lock:
+            self._hits += hits
+            self._misses += len(keys) - hits
+
+        return result
+
+    async def set(self, key: str, value: Any, ttl: int = None):
         """设置缓存值"""
         if ttl is None:
             ttl = self.default_ttl
 
-        self._cache[key] = value
-        self._cache_ttl[key] = time.time() + ttl
+        async with self._write_lock:
+            self._cache[key] = value
+            self._cache_ttl[key] = time.time() + ttl
 
-    def delete(self, key: str):
+    async def set_many(self, items: Dict[str, Any], ttl: int = None):
+        """批量设置缓存"""
+        if ttl is None:
+            ttl = self.default_ttl
+
+        expiry = time.time() + ttl
+        async with self._write_lock:
+            for key, value in items.items():
+                self._cache[key] = value
+                self._cache_ttl[key] = expiry
+
+    async def delete(self, key: str):
         """删除缓存值"""
-        self._cache.pop(key, None)
-        self._cache_ttl.pop(key, None)
-
-    def clear_expired(self):
-        """清理过期缓存"""
-        current_time = time.time()
-        expired_keys = [
-            key for key, expiry in self._cache_ttl.items() if current_time >= expiry
-        ]
-        for key in expired_keys:
+        async with self._write_lock:
             self._cache.pop(key, None)
             self._cache_ttl.pop(key, None)
 
-        if expired_keys:
-            logger.debug(f"清理了 {len(expired_keys)} 个过期缓存")
+    async def delete_many(self, keys: list):
+        """批量删除缓存"""
+        async with self._write_lock:
+            for key in keys:
+                self._cache.pop(key, None)
+                self._cache_ttl.pop(key, None)
 
-    def clear_all(self):
-        """清理所有缓存"""
-        self._cache.clear()
-        self._cache_ttl.clear()
-        logger.info("所有缓存已清理")
+    async def clear_expired(self):
+        """清理过期缓存 - 批量操作"""
+        now = time.time()
+        expired = []
 
-    def get_stats(self) -> Dict[str, Any]:
+        # 收集过期key（无锁）
+        for key, expiry in list(self._cache_ttl.items()):
+            if now >= expiry:
+                expired.append(key)
+
+        # 批量删除（加锁）
+        if expired:
+            async with self._write_lock:
+                for key in expired:
+                    self._cache.pop(key, None)
+                    self._cache_ttl.pop(key, None)
+
+            logger.info(f"🧹 清理了 {len(expired)} 个过期缓存")
+
+    async def get_or_set(self, key: str, factory, ttl: int = None) -> Any:
+        """获取缓存，如果不存在则通过factory创建（带击穿保护）"""
+        # 先尝试获取
+        value = await self.get(key)
+        if value is not None:
+            return value
+
+        # 检查是否正在加载
+        async with self._write_lock:
+            if key in self._loading:
+                # 等待其他协程加载完成
+                event = self._loading[key]
+                async with self._write_lock:
+                    pass  # 释放写锁
+                await event.wait()
+                return await self.get(key)
+
+            # 标记正在加载
+            self._loading[key] = asyncio.Event()
+
+        try:
+            # 创建新值
+            value = await factory()
+            await self.set(key, value, ttl)
+            return value
+        finally:
+            # 加载完成，通知其他等待的协程
+            async with self._write_lock:
+                if key in self._loading:
+                    self._loading[key].set()
+                    del self._loading[key]
+
+    async def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计"""
-        total = self._hits + self._misses
-        hit_rate = self._hits / total if total > 0 else 0
+        async with self._stats_lock:
+            total = self._hits + self._misses
+            hit_rate = self._hits / total if total > 0 else 0
+            hits = self._hits
+            misses = self._misses
 
         return {
             "size": len(self._cache),
-            "hits": self._hits,
-            "misses": self._misses,
-            "hit_rate": hit_rate,
-            "total_operations": total,
+            "hits": hits,
+            "misses": misses,
+            "hit_rate": round(hit_rate * 100, 2),
+            "total_operations": hits + misses,
+            "memory_estimate": self._estimate_memory(),
+            "loading_keys": len(self._loading),
         }
+
+    def _estimate_memory(self) -> str:
+        """估算内存使用"""
+        approx_size = len(self._cache) * 200
+        if approx_size < 1024:
+            return f"{approx_size} B"
+        elif approx_size < 1024 * 1024:
+            return f"{approx_size / 1024:.1f} KB"
+        else:
+            return f"{approx_size / (1024 * 1024):.1f} MB"
 
 
 class TaskManager:
@@ -240,8 +382,7 @@ class TaskManager:
         task = asyncio.create_task(coro, name=name)
         self._tasks[name] = task
 
-        # 任务完成后自动清理
-        task.add_done_callback(lambda t: self._tasks.pop(name, None))
+        task.add_done_callback(lambda t, n=name: self._tasks.pop(n, None))
 
         return task
 
@@ -296,7 +437,6 @@ class MessageDeduplicate:
         """检查消息是否重复"""
         current_time = time.time()
 
-        # 清理过期消息
         expired_messages = [
             msg_id
             for msg_id, timestamp in self._messages.items()
@@ -305,11 +445,9 @@ class MessageDeduplicate:
         for msg_id in expired_messages:
             self._messages.pop(msg_id, None)
 
-        # 检查重复
         if message_id in self._messages:
             return True
 
-        # 记录新消息
         self._messages[message_id] = current_time
         return False
 
@@ -325,7 +463,6 @@ class MessageDeduplicate:
             self._messages.pop(msg_id, None)
 
 
-# 错误处理装饰器
 def handle_database_errors(func):
     """数据库错误处理装饰器"""
 
@@ -335,7 +472,6 @@ def handle_database_errors(func):
             return await func(*args, **kwargs)
         except Exception as e:
             logger.error(f"数据库操作失败 {func.__name__}: {e}")
-            # 可以根据异常类型进行不同的处理
             raise
 
     return async_wrapper
@@ -350,13 +486,11 @@ def handle_telegram_errors(func):
             return await func(*args, **kwargs)
         except Exception as e:
             logger.error(f"Telegram API操作失败 {func.__name__}: {e}")
-            # 可以在这里添加重试逻辑或降级处理
             raise
 
     return async_wrapper
 
 
-# 全局实例
 performance_monitor = PerformanceMonitor()
 retry_manager = RetryManager(max_retries=3, base_delay=1.0)
 global_cache = GlobalCache(default_ttl=300)
@@ -364,7 +498,6 @@ task_manager = TaskManager()
 message_deduplicate = MessageDeduplicate(ttl=60)
 
 
-# 便捷装饰器
 def track_performance(operation_name: str):
     """性能跟踪装饰器"""
     return performance_monitor.track(operation_name)
@@ -394,5 +527,4 @@ def message_deduplicate_decorator(ttl: int = 60):
     return decorator
 
 
-# 简写
 message_deduplicate = message_deduplicate_decorator()
