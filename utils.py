@@ -1083,6 +1083,54 @@ def rate_limit(rate: int = 1, per: int = 1):
     return decorator
 
 
+def user_rate_limit(rate: int = 2, per: int = 60):
+    """用户级速率限制 - 每个用户独立计数"""
+    user_calls = {}  # {user_id: [call_times]}
+    user_lock = asyncio.Lock()
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(message: types.Message, *args, **kwargs):
+            if not message or not message.from_user:
+                return await func(message, *args, **kwargs)
+
+            user_id = message.from_user.id
+            now = time.time()
+
+            async with user_lock:
+                # 清理该用户过期的调用记录
+                if user_id in user_calls:
+                    user_calls[user_id] = [
+                        t for t in user_calls[user_id] if now - t < per
+                    ]
+                else:
+                    user_calls[user_id] = []
+
+                # 检查是否超过限制
+                if len(user_calls[user_id]) >= rate:
+                    # 计算还需要等待多久
+                    oldest_call = (
+                        min(user_calls[user_id]) if user_calls[user_id] else now
+                    )
+                    wait_seconds = int(per - (now - oldest_call))
+
+                    await message.answer(
+                        f"⏳ 您的操作过于频繁，请 {wait_seconds} 秒后再试",
+                        reply_to_message_id=message.message_id,
+                    )
+                    return
+
+                # 记录这次调用
+                user_calls[user_id].append(now)
+
+            # 执行原函数
+            return await func(message, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 user_lock_manager = UserLockManager()
 timer_manager = ActivityTimerManager()
 performance_optimizer = EnhancedPerformanceOptimizer()

@@ -55,6 +55,7 @@ from utils import (
     calculate_cross_day_time_diff,
     rate_limit,
     send_reset_notification,
+    user_rate_limit,
 )
 
 from fault_tolerance import (
@@ -3603,7 +3604,7 @@ async def cmd_at(message: types.Message):
     await process_back(message)
 
 
-@rate_limit(rate=5, per=60)
+@user_rate_limit(rate=2, per=60)
 @message_deduplicate
 @with_retry("work_start", max_retries=2)
 @track_performance("work_start")
@@ -3612,7 +3613,7 @@ async def cmd_workstart(message: types.Message):
     await process_work_checkin(message, "work_start")
 
 
-@rate_limit(rate=5, per=60)
+@user_rate_limit(rate=2, per=60)
 @message_deduplicate
 @with_retry("work_end", max_retries=2)
 @track_performance("work_end")
@@ -7286,6 +7287,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
 
         try:
             from database import db as database_db
+
             activity_limits = await database_db.get_activity_limits_cached()
             activity_names.update(activity_limits.keys())
         except Exception:
@@ -7300,6 +7302,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
             if isinstance(raw_activities, str):
                 try:
                     import json
+
                     raw_activities = json.loads(raw_activities)
                 except Exception:
                     raw_activities = {}
@@ -7332,11 +7335,10 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
                 elif isinstance(act_data, str):
                     try:
                         import json
+
                         parsed = json.loads(act_data)
                         if isinstance(parsed, dict):
-                            count = parsed.get(
-                                "count", parsed.get("activity_count", 0)
-                            )
+                            count = parsed.get("count", parsed.get("activity_count", 0))
                             time_val = parsed.get(
                                 "time", parsed.get("accumulated_time", 0)
                             )
@@ -7364,11 +7366,27 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
             if not formatted_activities:
 
                 exclude_fields = {
-                    "user_id","nickname","shift","statistic_date",
-                    "total_accumulated_time","total_activity_count","total_fines",
-                    "overtime_count","total_overtime_time","work_days","work_hours",
-                    "work_start_count","work_end_count","work_start_fines","work_end_fines",
-                    "late_count","early_count","created_at","updated_at","id","chat_id"
+                    "user_id",
+                    "nickname",
+                    "shift",
+                    "statistic_date",
+                    "total_accumulated_time",
+                    "total_activity_count",
+                    "total_fines",
+                    "overtime_count",
+                    "total_overtime_time",
+                    "work_days",
+                    "work_hours",
+                    "work_start_count",
+                    "work_end_count",
+                    "work_start_fines",
+                    "work_end_fines",
+                    "late_count",
+                    "early_count",
+                    "created_at",
+                    "updated_at",
+                    "id",
+                    "chat_id",
                 }
 
                 for key, value in stat.items():
@@ -7413,9 +7431,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
 
             result.append(user_data)
 
-        logger.info(
-            f"✅ 从月度表成功获取 {target_date} 数据，共 {len(result)} 个用户"
-        )
+        logger.info(f"✅ 从月度表成功获取 {target_date} 数据，共 {len(result)} 个用户")
 
         return result
 
@@ -7423,6 +7439,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
         logger.error(f"❌ 从月度表获取数据失败: {e}")
         logger.error(traceback.format_exc())
         return []
+
 
 async def export_and_push_csv(
     chat_id: int,
