@@ -104,6 +104,8 @@ class PostgreSQLDatabase:
             # 创建新连接池
             await self._initialize_impl()
 
+            self._initialized = True
+
             self._reconnect_attempts = 0
             logger.info("✅ 数据库重连成功")
 
