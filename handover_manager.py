@@ -625,7 +625,6 @@ class HandoverManager:
         self._handover_cache_ttl[key] = time.time() + ttl
 
     # ========== 用户周期管理（修改后的方法）==========
-
     async def get_user_cycle(
         self,
         chat_id: int,
@@ -669,6 +668,24 @@ class HandoverManager:
             if row:
                 result = dict(row)
                 await self._set_user_cycle_cached(cache_key, result)
+
+                # ===== 在这里添加防御性代码 =====
+                if cycle == 2:
+                    # 检查周期1是否存在且是否真的结束了
+                    cycle1_data = await self.get_user_cycle(
+                        chat_id, user_id, business_date, period_type, 1
+                    )
+                    if cycle1_data:
+                        total_work_seconds = cycle1_data.get("total_work_seconds", 0)
+                        threshold = 12 * 3600
+                        if total_work_seconds < threshold:
+                            logger.warning(
+                                f"⚠️ 周期2已存在但周期1未满12小时: "
+                                f"用户={user_id}, 日期={business_date}, "
+                                f"周期1累计={total_work_seconds//60}分钟"
+                            )
+                # ===== 防御性代码结束 =====
+
                 return result
             return None
 
@@ -736,16 +753,16 @@ class HandoverManager:
         elapsed_seconds: int,
     ) -> Tuple[int, bool]:
         """
-        更新用户周期工作时间
+        更新用户周期工作时间（稳定版）
 
         返回: (新累计时间, 是否达到周期切换点)
         """
+
         cycle_data = await self.get_user_cycle(
             chat_id, user_id, business_date, period_type, cycle
         )
 
         if not cycle_data and cycle == 1:
-            # 周期1不存在，创建它
             await self.create_user_cycle(
                 chat_id, user_id, business_date, period_type, 1
             )
@@ -757,44 +774,68 @@ class HandoverManager:
             logger.warning(f"用户 {user_id} 周期 {cycle} 不存在")
             return 0, False
 
-        new_total = cycle_data["total_work_seconds"] + elapsed_seconds
-        threshold_seconds = 12 * 3600  # 12小时
+        current_total = cycle_data["total_work_seconds"]
+        threshold_seconds = 12 * 3600
+
+        # ===== 异常检测 =====
+        # 检查单次增加是否过大
+        if elapsed_seconds > 4 * 3600:  # 单次超过4小时？
+            logger.warning(
+                f"⚠️ 单次增加过大 user={user_id} "
+                f"cycle={cycle} add={elapsed_seconds/3600:.2f}小时"
+            )
 
         try:
-            await db.execute_with_retry(
-                "更新用户周期工作时间",
+            shift_type = "night" if "night" in period_type else "day"
+
+            # ===== 原子更新（防并发覆盖）=====
+            row = await db.execute_with_retry(
+                "原子更新周期时间",
                 """
-                UPDATE user_handover_cycles 
-                SET total_work_seconds = $1,
+                UPDATE user_handover_cycles
+                SET total_work_seconds = total_work_seconds + $1,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = $2 AND user_id = $3 
-                  AND handover_date = $4 AND shift_type = $5 AND cycle_number = $6
+                WHERE chat_id = $2 AND user_id = $3
+                  AND handover_date = $4 AND shift_type = $5
+                  AND cycle_number = $6
+                RETURNING total_work_seconds
                 """,
-                new_total,
+                elapsed_seconds,
                 chat_id,
                 user_id,
                 business_date,
-                "night" if "night" in period_type else "day",
+                shift_type,
                 cycle,
+                fetchrow=True,
             )
 
-            # 使缓存失效（而不是更新，保证一致性）
+            if not row:
+                # 更新失败（可能记录被删？）
+                logger.error(f"周期更新无返回 user={user_id} cycle={cycle}")
+                return current_total, False
+
+            new_total = row["total_work_seconds"]
+
+            # ===== 最终异常检测 =====
+            if new_total > 13 * 3600:
+                logger.error(
+                    f"❌ 周期累计异常 user={user_id} "
+                    f"cycle={cycle} hours={new_total/3600:.2f}"
+                )
+
             await self._invalidate_user_cycle_cache(chat_id, user_id)
 
-            # 判断是否达到12小时阈值
             reached_threshold = (
-                cycle_data["total_work_seconds"] < threshold_seconds
-                and new_total >= threshold_seconds
+                current_total < threshold_seconds and new_total >= threshold_seconds
             )
 
             return new_total, reached_threshold
 
         except Exception as e:
-            logger.error(f"更新用户周期工作时间失败 {chat_id}-{user_id}: {e}")
-            return cycle_data["total_work_seconds"], False
+            logger.error(f"更新用户周期失败 {chat_id}-{user_id}: {e}")
+            return current_total, False
 
     # ========== 对外核心接口（原样保留）==========
-
     async def get_activity_count(
         self,
         chat_id: int,
@@ -839,12 +880,53 @@ class HandoverManager:
                 f"🔄 [计数-周期1] 业务日期 {period['business_date']}, 计数: {all_counts}"
             )
             return all_counts
-        else:
-            # 周期2：计数重置，从0开始
-            logger.debug(
-                f"🔄 [计数-周期2] 业务日期 {period['business_date']}, 计数重置"
-            )
-            return 0
+
+        # 周期2：计数重置
+        logger.debug(f"🔄 [计数-周期2] 业务日期 {period['business_date']}, 计数重置")
+
+        # ===== 防御性检查（不会影响主逻辑）=====
+        try:
+            if cycle_data and cycle_data.get("cycle_start_time"):
+                cycle_start = cycle_data["cycle_start_time"]
+
+                # 统一解析时间
+                if isinstance(cycle_start, str):
+                    try:
+                        cycle_start = datetime.fromisoformat(
+                            cycle_start.replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        cycle_start = None
+
+                # 如果解析成功再计算
+                if isinstance(cycle_start, datetime):
+                    # 统一时区避免错误
+                    if cycle_start.tzinfo and current_time.tzinfo is None:
+                        current_time = current_time.replace(tzinfo=cycle_start.tzinfo)
+
+                    time_since_start = (
+                        current_time - cycle_start
+                    ).total_seconds() / 3600
+
+                    # 周期2刚开始的提示
+                    if 0 <= time_since_start < 1:
+                        logger.info(
+                            f"ℹ️ 周期2刚开始 {time_since_start:.2f}小时 "
+                            f"user={user_id} date={period['business_date']}"
+                        )
+
+                    # 时间异常检测
+                    if time_since_start < 0:
+                        logger.warning(
+                            f"⚠️ 周期时间异常 "
+                            f"user={user_id} start={cycle_start} now={current_time}"
+                        )
+
+        except Exception as check_error:
+            # 防御：绝不影响主流程
+            logger.debug(f"周期检查失败: {check_error}")
+
+        # ==
 
     async def record_activity(
         self,
@@ -1088,4 +1170,3 @@ class HandoverManager:
 
 # 全局实例
 handover_manager = HandoverManager()
-
