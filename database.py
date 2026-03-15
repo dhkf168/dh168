@@ -66,12 +66,20 @@ class PostgreSQLDatabase:
             is_healthy = await self.connection_health_check()
             if not is_healthy:
                 logger.warning("数据库连接不健康，尝试重连...")
-                await self._reconnect()
+                await self._reconnect()  # 修复后的 _reconnect 会设置 _initialized=True
+                # 重连后再次验证
+                is_healthy = await self.connection_health_check()
+                if not is_healthy:
+                    logger.error("重连后数据库仍然不健康")
+                    return False
 
             self._last_connection_check = current_time
             return True
+
         except Exception as e:
             logger.error(f"数据库连接检查失败: {e}")
+            # 重要：标记为未初始化
+            self._initialized = False
             return False
 
     async def _reconnect(self):
@@ -419,91 +427,150 @@ class PostgreSQLDatabase:
             logger.error(f"连接池监控失败: {e}")
 
     async def _connection_maintenance_loop(self):
-        """连接维护循环 - 完整优化版"""
-        logger.info("🚀 数据库连接维护循环已启动")
+        """企业级数据库连接维护循环"""
 
-        # 记录上次执行监控的时间
+        logger.info("🚀 Database maintenance loop started")
+
+        base_interval = 60
+        monitor_interval = 300
+        cache_cleanup_interval = 600
+
         last_monitor_time = 0
-        monitor_interval = 300  # 5分钟执行一次监控
-
-        # 初始化上次清理的小时
+        last_cache_cleanup = time.time()
         last_cleanup_hour = -1
 
-        # 记录上次清理缓存的时间
-        last_cache_cleanup = time.time()
-        cache_cleanup_interval = 600  # 10分钟清理一次缓存
+        consecutive_failures = 0
+        max_backoff = 600
+
+        # ✅ 添加：记录上次成功时间
+        last_success_time = time.time()
 
         while self._maintenance_running:
+
             try:
-                # ===== 动态睡眠，基准循环为 60 秒 =====
-                await asyncio.sleep(60)
 
-                # ===== 1. 快速健康检查：如果连接断开，优先处理重连 =====
-                try:
-                    if not await self.connection_health_check():
-                        logger.warning("⚠️ 数据库连接不健康，尝试重连...")
-                        await self._reconnect()
-                        continue
-                except Exception as e:
-                    logger.error(f"❌ 健康检查失败: {e}")
-                    continue
+                # ===== 动态 sleep（指数退避）=====
+                sleep_time = min(base_interval * (2**consecutive_failures), max_backoff)
+                await asyncio.sleep(sleep_time)
 
-                # ===== 2. 定期清理缓存：防止内存泄漏 =====
                 current_time = time.time()
-                if current_time - last_cache_cleanup >= cache_cleanup_interval:
+
+                # ===== 1 健康检查 =====
+                try:
+                    healthy = await self.connection_health_check()
+                except Exception as e:
+                    logger.error(f"❌ Health check error: {e}")
+                    healthy = False
+
+                if not healthy:
+
+                    logger.warning("⚠️ Database unhealthy")
+
                     try:
+                        # ✅ 确保使用正确的方法名
+                        if hasattr(self, "_safe_reconnect"):
+                            await self._safe_reconnect()
+                        else:
+                            await self._reconnect()
+
+                        # 再次验证
+                        if not await self.connection_health_check():
+                            raise RuntimeError("Reconnect validation failed")
+
+                        logger.info("✅ Database reconnected successfully")
+
+                        consecutive_failures = 0
+                        last_success_time = current_time
+                        continue
+
+                    except Exception as e:
+
+                        consecutive_failures += 1
+
+                        logger.error(
+                            f"❌ Reconnect failed "
+                            f"(failure #{consecutive_failures}): {e}"
+                        )
+
+                        # ✅ 如果长时间无法连接，可以触发告警
+                        if current_time - last_success_time > 3600:  # 1小时
+                            logger.critical("🚨 Database offline for over 1 hour!")
+
+                        continue
+
+                else:
+                    consecutive_failures = 0
+                    last_success_time = current_time
+
+                # ===== 2 缓存清理 =====
+                if current_time - last_cache_cleanup >= cache_cleanup_interval:
+
+                    try:
+
                         cache_before = len(self._cache)
+
                         await self.cleanup_cache()
+
                         cache_after = len(self._cache)
+
                         if cache_before != cache_after:
                             logger.debug(
-                                f"🧹 缓存清理: {cache_before} -> {cache_after}"
+                                f"🧹 Cache cleanup {cache_before} -> {cache_after}"
                             )
-                        last_cache_cleanup = current_time
-                    except Exception as e:
-                        logger.error(f"❌ 缓存清理失败: {e}")
 
-                # ===== 3. 每 5 分钟执行一次深度监控：记录连接池指标 =====
+                        last_cache_cleanup = current_time
+
+                    except Exception as e:
+                        logger.error(f"❌ Cache cleanup failed: {e}")
+
+                # ===== 3 连接池监控 =====
                 if current_time - last_monitor_time >= monitor_interval:
+
                     try:
                         await self._monitor_pool_health()
                     except Exception as e:
-                        logger.error(f"❌ 深度监控失败: {e}")
+                        logger.error(f"❌ Pool monitoring failed: {e}")
+
                     last_monitor_time = current_time
 
-                # ===== 4. 每小时执行一次数据清理：维护数据库体积 =====
+                # ===== 4 每小时数据维护 =====
                 current_hour = datetime.now().hour
+
                 if current_hour != last_cleanup_hour:
+
                     last_cleanup_hour = current_hour
 
                     try:
-                        # 清理常规业务旧数据（根据配置的天数）
-                        daily_deleted = await self.cleanup_old_data(
+
+                        deleted = await self.cleanup_old_data(
                             days=Config.DATA_RETENTION_DAYS
                         )
 
-                        # 清理旧的重置日志（固定保留 90 天）
                         logs_deleted = await self.cleanup_old_reset_logs(days=90)
 
-                        if daily_deleted > 0 or logs_deleted > 0:
+                        if deleted or logs_deleted:
+
                             logger.info(
-                                f"🧹 每小时清理完成: "
-                                f"业务数据={daily_deleted}, 重置日志={logs_deleted}"
+                                f"🧹 Hourly cleanup "
+                                f"data={deleted}, logs={logs_deleted}"
                             )
+
                     except Exception as e:
-                        logger.error(f"❌ 每小时数据清理失败: {e}")
+                        logger.error(f"❌ Hourly cleanup failed: {e}")
 
             except asyncio.CancelledError:
-                # 捕获 asyncio 取消信号，确保服务关闭时干净退出
-                logger.info("🛑 数据库连接维护任务被取消")
-                break
-            except Exception as e:
-                # 全局捕获：记录完整堆栈，并进入 60 秒退避期防止异常死循环
-                logger.error(f"❌ 连接维护任务异常: {e}")
-                logger.exception(e)  # 打印完整堆栈到日志
-                await asyncio.sleep(60)
 
-        logger.info("🏁 数据库连接维护循环已结束")
+                logger.info("🛑 Maintenance loop cancelled")
+
+                break
+
+            except Exception as e:
+
+                logger.exception(f"❌ Maintenance loop error: {e}")
+
+                consecutive_failures += 1
+
+        logger.info("🏁 Database maintenance loop stopped")
 
     async def _cleanup_cache_if_needed(self):
         """按需清理缓存"""
@@ -1041,6 +1108,14 @@ class PostgreSQLDatabase:
                 logger.info("PostgreSQL连接池已关闭")
         except Exception as e:
             logger.warning(f"关闭数据库连接时出现异常: {e}")
+        finally:
+            # ✅ 1. 重置初始化标志
+            self._initialized = False
+            # ✅ 2. 清空连接池引用
+            self.pool = None
+            # ✅ 3. 重置重连计数（可选）
+            self._reconnect_attempts = 0
+            logger.debug("数据库连接状态已重置")
 
     # ========== 缓存管理 ==========
     def _get_cached(self, key: str):
@@ -2365,7 +2440,7 @@ class PostgreSQLDatabase:
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    
+
                     # ===== 新增：在删除前先获取并保存工作相关数据到月度统计 =====
                     # 获取工作相关统计数据
                     work_stats = await conn.fetchrow(
@@ -2386,12 +2461,12 @@ class PostgreSQLDatabase:
                         user_id,
                         target_date,
                     )
-                    
+
                     if work_stats and any(work_stats.values()):
                         statistic_date = target_date.replace(day=1)
-                        
+
                         # 保存工作开始次数到月度统计
-                        if work_stats['total_work_start']:
+                        if work_stats["total_work_start"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2405,11 +2480,11 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_work_start'],
+                                work_stats["total_work_start"],
                             )
-                        
+
                         # 保存工作结束次数到月度统计
-                        if work_stats['total_work_end']:
+                        if work_stats["total_work_end"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2423,11 +2498,11 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_work_end'],
+                                work_stats["total_work_end"],
                             )
-                        
+
                         # 保存上班罚款到月度统计
-                        if work_stats['total_work_start_fines']:
+                        if work_stats["total_work_start_fines"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2441,11 +2516,11 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_work_start_fines'],
+                                work_stats["total_work_start_fines"],
                             )
-                        
+
                         # 保存下班罚款到月度统计
-                        if work_stats['total_work_end_fines']:
+                        if work_stats["total_work_end_fines"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2459,11 +2534,11 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_work_end_fines'],
+                                work_stats["total_work_end_fines"],
                             )
-                        
+
                         # 保存迟到次数到月度统计
-                        if work_stats['total_late']:
+                        if work_stats["total_late"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2477,11 +2552,11 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_late'],
+                                work_stats["total_late"],
                             )
-                        
+
                         # 保存早退次数到月度统计
-                        if work_stats['total_early']:
+                        if work_stats["total_early"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2495,11 +2570,11 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_early'],
+                                work_stats["total_early"],
                             )
-                        
+
                         # 保存工作天数到月度统计
-                        if work_stats['total_work_days']:
+                        if work_stats["total_work_days"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2513,11 +2588,11 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_work_days'],
+                                work_stats["total_work_days"],
                             )
-                        
+
                         # 保存工作时长到月度统计
-                        if work_stats['total_work_hours']:
+                        if work_stats["total_work_hours"]:
                             await conn.execute(
                                 """
                                 INSERT INTO monthly_statistics
@@ -2531,9 +2606,9 @@ class PostgreSQLDatabase:
                                 chat_id,
                                 user_id,
                                 statistic_date,
-                                work_stats['total_work_hours'],
+                                work_stats["total_work_hours"],
                             )
-                        
+
                         logger.info(
                             f"📊 [月度统计同步] 用户:{user_id} 日期:{target_date}\n"
                             f"   ├─ 上班次数: {work_stats['total_work_start'] or 0}\n"

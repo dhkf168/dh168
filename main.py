@@ -3604,7 +3604,7 @@ async def cmd_at(message: types.Message):
     await process_back(message)
 
 
-@user_rate_limit(rate=2, per=60)
+@user_rate_limit(rate=3, per=60)
 @message_deduplicate
 @with_retry("work_start", max_retries=2)
 @track_performance("work_start")
@@ -3613,7 +3613,7 @@ async def cmd_workstart(message: types.Message):
     await process_work_checkin(message, "work_start")
 
 
-@user_rate_limit(rate=2, per=60)
+@user_rate_limit(rate=3, per=60)
 @message_deduplicate
 @with_retry("work_end", max_retries=2)
 @track_performance("work_end")
@@ -8391,6 +8391,8 @@ async def initialize_services():
         # 确保数据库完全就绪
         max_wait = 30
         waited = 0
+        initialization_success = False
+
         while waited < max_wait:
             if db._initialized and db.pool:
                 try:
@@ -8398,13 +8400,25 @@ async def initialize_services():
                     async with db.pool.acquire() as test_conn:
                         await test_conn.fetchval("SELECT 1")
                     logger.info(f"✅ 数据库连接测试通过 (等待 {waited}s)")
+                    initialization_success = True
                     break
                 except Exception as e:
                     logger.warning(f"数据库连接测试失败: {e}")
+                    # ✅ 关键修复：标记为未初始化
+                    db._initialized = False
+                    # ✅ 尝试重新连接
+                    try:
+                        await db._reconnect()
+                        logger.info("🔄 数据库重新连接成功")
+                    except Exception as reconnect_error:
+                        logger.error(f"❌ 数据库重新连接失败: {reconnect_error}")
 
             logger.debug(f"⏳ 等待数据库完全初始化... ({waited}s)")
             await asyncio.sleep(1)
             waited += 1
+
+        if not initialization_success:
+            raise RuntimeError("数据库初始化失败 - 无法建立稳定连接")
 
         if waited >= max_wait:
             raise RuntimeError("数据库初始化超时")
