@@ -3483,8 +3483,8 @@ async def handle_myinfo_night_command(message: types.Message):
     async with user_lock:
         await show_history(message, "night")
 
-
-@rate_limit(rate=10, per=60)
+@user_rate_limit(rate=10, per=60)
+@rate_limit(rate=30, per=60)
 @track_performance("cmd_ranking")
 async def handle_ranking_command(message: types.Message):
     """处理 /ranking 命令"""
@@ -6309,15 +6309,15 @@ async def cmd_worktime(message: types.Message):
             reply_to_message_id=message.message_id,
         )
 
-
-@rate_limit(rate=10, per=60)
+@user_rate_limit(rate=10, per=60)
+@rate_limit(rate=20, per=60)
 async def handle_back_command(message: types.Message):
     """处理回座命令"""
     await process_back(message)
 
 
-@user_rate_limit(rate=4, per=60) 
-@rate_limit(rate=15, per=60) 
+@user_rate_limit(rate=5, per=60) 
+@rate_limit(rate=30, per=60) 
 async def handle_work_buttons(message: types.Message):
     """处理上下班按钮"""
     chat_id = message.chat.id
@@ -6486,7 +6486,8 @@ async def handle_back_to_main_menu(message: types.Message):
     logger.info(f"已为用户 {uid} 返回主菜单")
 
 
-@rate_limit(rate=10, per=60)
+@user_rate_limit(rate=10, per=60)
+@rate_limit(rate=20, per=60)
 async def handle_all_text_messages(message: types.Message):
     """统一处理所有文本消息"""
     text = message.text.strip()
