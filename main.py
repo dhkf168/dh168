@@ -6316,7 +6316,8 @@ async def handle_back_command(message: types.Message):
     await process_back(message)
 
 
-@rate_limit(rate=5, per=60)
+@user_rate_limit(rate=4, per=60) 
+@rate_limit(rate=15, per=60) 
 async def handle_work_buttons(message: types.Message):
     """处理上下班按钮"""
     chat_id = message.chat.id
