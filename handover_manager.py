@@ -840,202 +840,91 @@ class HandoverManager:
         self,
         chat_id: int,
         user_id: int,
-        activity: Union[str, List[str]],
-        shift: Optional[str] = None,
-        query_date: Optional[date] = None,
-        use_cache: bool = True,
-        cache_ttl: int = 300,  # 添加缓存TTL
-    ) -> Union[int, Dict[str, int]]:
+        activity: str,
+        shift: str,
+        current_time: Optional[datetime] = None,
+    ) -> int:
         """
-        企业级最终版：获取用户特定活动次数
+        获取用户在当前周期的活动计数
 
-        Args:
-            chat_id: 群组ID
-            user_id: 用户ID
-            activity: 单个活动名称或活动列表
-            shift: 可选班次 'day'/'night'，夜班凌晨自动调整日期
-            query_date: 指定查询日期，默认使用业务日期
-            use_cache: 是否启用缓存
-            cache_ttl: 缓存有效期（秒）
-
-        Returns:
-            单个活动返回 int，多活动返回 dict {activity_name: count}
+        关键：在换班日，12小时后计数重置
         """
-        # ===== 参数检查 =====
-        if not isinstance(chat_id, int):
-            raise TypeError(f"chat_id 必须是 int，但收到了 {type(chat_id)}")
-        if not isinstance(user_id, int):
-            raise TypeError(f"user_id 必须是 int，但收到了 {type(user_id)}")
+        if current_time is None:
+            current_time = db.get_beijing_time()
 
-        # 处理活动参数
-        if isinstance(activity, str):
-            activities = [activity]
-            single_mode = True
-        elif isinstance(activity, list) and all(isinstance(a, str) for a in activity):
-            activities = activity
-            single_mode = False
-        else:
-            raise TypeError("activity 必须是 str 或 List[str]")
+        # 获取当前时期信息
+        period = await self.determine_current_period(chat_id, current_time)
 
-        if shift is not None and not isinstance(shift, str):
-            raise TypeError("shift 必须是字符串或 None")
-        if query_date is not None and not isinstance(query_date, date):
-            raise TypeError("query_date 必须是 date 类型或 None")
+        # 查询该业务日期的所有计数
+        all_counts = await db.get_user_activity_count_by_shift(
+            chat_id, user_id, activity, shift, query_date=period["business_date"]
+        )
 
-        # ===== 获取业务日期（考虑换班）=====
-        if query_date:
-            target_date = query_date
-            logger.debug(f"📅 使用传入查询日期: {target_date}")
-        else:
-            # 获取当前时间用于判定夜班日期
-            current_time = self.get_beijing_time()
+        if not period["is_handover"]:
+            # 非换班日，直接返回
+            logger.debug(f"📊 [计数] 正常日: {all_counts}")
+            return all_counts
 
-            # ✅ 修复：使用 determine_current_period 获取正确的业务日期
-            from handover_manager import handover_manager
+        # 换班日，获取当前周期
+        cycle_data = await self.get_user_cycle(
+            chat_id,
+            user_id,
+            period["business_date"],
+            period["period_type"],
+            period["cycle"],
+        )
 
-            period = await handover_manager.determine_current_period(
-                chat_id, current_time
+        if period["cycle"] == 1:
+            # 周期1：返回所有计数（周期2还未开始）
+            logger.debug(
+                f"🔄 [计数-周期1] 业务日期 {period['business_date']}, 计数: {all_counts}"
             )
-            target_date = period["business_date"]
-            logger.debug(f"📅 使用换班业务日期: {target_date}")
+            return all_counts
 
-            # ✅ 修复：夜班凌晨查询日期调整
-            # if shift == "night":
-            #     current_hour = current_time.hour
-            #     # 如果是凌晨（0-12点），需要查询前一天的数据
-            #     # 因为夜班活动在凌晨查询时，应该统计的是昨晚的夜班数据
-            #     if current_hour < 12:
-            #         target_date = target_date - timedelta(days=1)
-            #         logger.info(
-            #             f"🌙 [夜班凌晨调整] 当前时间={current_hour}:00, "
-            #             f"原业务日期={period['business_date']}, "
-            #             f"调整后查询日期={target_date}"
-            #         )
-            #     else:
-            #         logger.debug(
-            #             f"🌙 [夜班正常查询] 当前时间={current_hour}:00, "
-            #             f"查询日期={target_date}"
-            #         )
-            # else:
-            #     logger.debug(f"☀️ [白班查询] 查询日期={target_date}")
+        # 周期2：计数重置
+        logger.debug(f"🔄 [计数-周期2] 业务日期 {period['business_date']}, 计数重置")
 
-        # ===== 规范化班次 =====
-        final_shift = None
-        if shift:
-            shift_clean = shift.strip().lower()
-            if shift_clean.startswith("night"):
-                final_shift = "night"
-            elif shift_clean == "day":
-                final_shift = "day"
-            # 其他值保持 None（不区分班次）
+        # ===== 防御性检查（不会影响主逻辑）=====
+        try:
+            if cycle_data and cycle_data.get("cycle_start_time"):
+                cycle_start = cycle_data["cycle_start_time"]
 
-        # ===== 初始化缓存字典（如果不存在）=====
-        if not hasattr(self, "_activity_cache"):
-            self._activity_cache = {}
-            self._activity_cache_ttl = {}
-            self._last_cache_cleanup = time.time()
-
-        # ===== 定期清理缓存 =====
-        now = time.time()
-        if now - self._last_cache_cleanup > 3600:  # 每小时清理一次
-            expired = [k for k, t in self._activity_cache_ttl.items() if now > t]
-            for k in expired:
-                self._activity_cache.pop(k, None)
-                self._activity_cache_ttl.pop(k, None)
-            self._last_cache_cleanup = now
-            if expired:
-                logger.debug(f"🧹 清理了 {len(expired)} 个活动缓存")
-
-        # ===== 检查缓存 =====
-        result = {}
-        to_query = []
-
-        for act in activities:
-            cache_key = (chat_id, user_id, act, final_shift, target_date)
-            if use_cache and cache_key in self._activity_cache:
-                # 检查是否过期
-                if (
-                    cache_key in self._activity_cache_ttl
-                    and now < self._activity_cache_ttl[cache_key]
-                ):
-                    result[act] = self._activity_cache[cache_key]
-                    continue
-                else:
-                    # 过期了，重新查询
-                    self._activity_cache.pop(cache_key, None)
-                    self._activity_cache_ttl.pop(cache_key, None)
-
-            to_query.append(act)
-
-        # ===== 批量查询数据库 =====
-        if to_query:
-            params = [chat_id, user_id, target_date, to_query]
-            query_sql = """
-                SELECT activity_name, SUM(activity_count) AS total_count
-                FROM user_activities
-                WHERE chat_id=$1 
-                  AND user_id=$2 
-                  AND activity_date=$3
-                  AND activity_name = ANY($4::text[])
-            """
-            if final_shift:
-                query_sql += " AND shift=$5"
-                params.append(final_shift)
-            query_sql += " GROUP BY activity_name"
-
-            try:
-                rows = await db.execute_with_retry(
-                    f"获取活动次数({len(to_query)}个)",
-                    query_sql,
-                    *params,
-                    fetch=True,
-                    slow_threshold=0.5,
-                )
-
-                # 组装查询结果
-                found = set()
-                for row in rows:
-                    act_name = row["activity_name"]
-                    count = row["total_count"] or 0
-                    result[act_name] = count
-                    found.add(act_name)
-
-                    if use_cache:
-                        cache_key = (
-                            chat_id,
-                            user_id,
-                            act_name,
-                            final_shift,
-                            target_date,
+                # 统一解析时间
+                if isinstance(cycle_start, str):
+                    try:
+                        cycle_start = datetime.fromisoformat(
+                            cycle_start.replace("Z", "+00:00")
                         )
-                        self._activity_cache[cache_key] = count
-                        self._activity_cache_ttl[cache_key] = now + cache_ttl
+                    except Exception:
+                        cycle_start = None
 
-                # 未找到的活动默认 0
-                for act_name in to_query:
-                    if act_name not in found:
-                        result[act_name] = 0
-                        if use_cache:
-                            cache_key = (
-                                chat_id,
-                                user_id,
-                                act_name,
-                                final_shift,
-                                target_date,
-                            )
-                            self._activity_cache[cache_key] = 0
-                            self._activity_cache_ttl[cache_key] = now + cache_ttl
+                # 如果解析成功再计算
+                if isinstance(cycle_start, datetime):
+                    # 统一时区避免错误
+                    if cycle_start.tzinfo and current_time.tzinfo is None:
+                        current_time = current_time.replace(tzinfo=cycle_start.tzinfo)
 
-            except Exception as e:
-                logger.error(f"❌ 获取活动次数失败: {e}")
-                # 出错时所有未查询到的活动返回0
-                for act_name in to_query:
-                    result[act_name] = 0
+                    time_since_start = (
+                        current_time - cycle_start
+                    ).total_seconds() / 3600
 
-        # ===== 返回结果 =====
-        if single_mode:
-            return result[activities[0]]
-        return result
+                    # 周期2刚开始的提示
+                    if 0 <= time_since_start < 1:
+                        logger.info(
+                            f"ℹ️ 周期2刚开始 {time_since_start:.2f}小时 "
+                            f"user={user_id} date={period['business_date']}"
+                        )
+
+                    # 时间异常检测
+                    if time_since_start < 0:
+                        logger.warning(
+                            f"⚠️ 周期时间异常 "
+                            f"user={user_id} start={cycle_start} now={current_time}"
+                        )
+
+        except Exception as check_error:
+            # 防御：绝不影响主流程
+            logger.debug(f"周期检查失败: {check_error}")
 
     async def record_activity(
         self,
