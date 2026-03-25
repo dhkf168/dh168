@@ -882,16 +882,42 @@ class HandoverManager:
         if query_date is not None and not isinstance(query_date, date):
             raise TypeError("query_date 必须是 date 类型或 None")
 
-        # ===== 处理夜班日期 =====
+        # ===== 获取业务日期（考虑换班）=====
         if query_date:
             target_date = query_date
+            logger.debug(f"📅 使用传入查询日期: {target_date}")
         else:
-            target_date = await self.get_business_date(chat_id)
-            if shift == "night":
-                current_hour = self.get_beijing_time().hour
-                if current_hour < 12:
-                    target_date -= timedelta(days=1)
-                    logger.debug(f"🌙 夜班凌晨查询，日期调整为: {target_date}")
+            # 获取当前时间用于判定夜班日期
+            current_time = self.get_beijing_time()
+
+            # ✅ 修复：使用 determine_current_period 获取正确的业务日期
+            from handover_manager import handover_manager
+
+            period = await handover_manager.determine_current_period(
+                chat_id, current_time
+            )
+            target_date = period["business_date"]
+            logger.debug(f"📅 使用换班业务日期: {target_date}")
+
+            # ✅ 修复：夜班凌晨查询日期调整
+            # if shift == "night":
+            #     current_hour = current_time.hour
+            #     # 如果是凌晨（0-12点），需要查询前一天的数据
+            #     # 因为夜班活动在凌晨查询时，应该统计的是昨晚的夜班数据
+            #     if current_hour < 12:
+            #         target_date = target_date - timedelta(days=1)
+            #         logger.info(
+            #             f"🌙 [夜班凌晨调整] 当前时间={current_hour}:00, "
+            #             f"原业务日期={period['business_date']}, "
+            #             f"调整后查询日期={target_date}"
+            #         )
+            #     else:
+            #         logger.debug(
+            #             f"🌙 [夜班正常查询] 当前时间={current_hour}:00, "
+            #             f"查询日期={target_date}"
+            #         )
+            # else:
+            #     logger.debug(f"☀️ [白班查询] 查询日期={target_date}")
 
         # ===== 规范化班次 =====
         final_shift = None
