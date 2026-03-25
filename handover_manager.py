@@ -4,7 +4,7 @@ import logging
 import asyncio
 import time
 from datetime import datetime, date, timedelta, time as dt_time
-from typing import Dict, Optional, Tuple, Any, List, Union
+from typing import Dict, Optional, Tuple, Any, List
 
 from database import db
 from config import beijing_tz, Config
@@ -925,6 +925,8 @@ class HandoverManager:
         except Exception as check_error:
             # 防御：绝不影响主流程
             logger.debug(f"周期检查失败: {check_error}")
+
+        # ==
 
     async def record_activity(
         self,

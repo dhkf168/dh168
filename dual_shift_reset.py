@@ -157,12 +157,13 @@ async def handle_hard_reset(
 
 
 # ========== 2. 双班硬重置核心流程 ==========
+# ========== 2. 双班硬重置核心流程 ==========
 async def _dual_shift_hard_reset(
     chat_id: int,
     operator_id: Optional[int] = None,
     forced_target_date: Optional[date] = None,
 ) -> bool:
-    """双班硬重置主流程（修复版-确保下班统计正确）"""
+    """双班硬重置主流程（带看门狗+重试协同保护）"""
 
     # ===== 1. 创建看门狗，保护整个流程 =====
     watchdog = Watchdog(timeout=300, name=f"dual_reset_{chat_id}")
@@ -297,49 +298,41 @@ async def _dual_shift_hard_reset(
             "details": [],
         }
 
-        # ===== 🎯 修复点1：先执行补全下班记录 =====
-        logger.info(f"📊 [步骤1/5] 开始补全未打卡的下班记录...")
+        logger.info(f"📊 [步骤1-2/5] 并发处理未完成活动及补全下班记录...")
 
-        # 先执行补全下班记录
-        try:
-            complete_stats = await watchdog.run(
-                _complete_missing_work_ends(chat_id, target_date, business_today)
-            )
-            logger.info(
-                f"✅ 补全下班记录完成: {complete_stats['success']}/{complete_stats['total']}"
-            )
-        except Exception as e:
-            logger.error(f"❌ [补全下班记录] 失败: {e}")
-            logger.error(traceback.format_exc())
+        # ===== 2. 使用看门狗保护并发任务 =====
+        task1 = asyncio.create_task(
+            _force_end_all_unfinished_shifts(chat_id, now, target_date, business_today)
+        )
+        task2 = asyncio.create_task(
+            _complete_missing_work_ends(chat_id, target_date, business_today)
+        )
+
+        # 使用看门狗保护 gather 操作，防止卡死
+        results = await watchdog.run(
+            asyncio.gather(task1, task2, return_exceptions=True)
+        )
+        # 喂狗：步骤1-2完成
         watchdog.feed()
+        # ===== 结束 =====
 
-        # ===== 🎯 修复点2：再执行强制结束活动 =====
-        logger.info(f"📊 [步骤2/5] 开始强制结束未完成活动...")
-
-        try:
-            force_stats = await watchdog.run(
-                _force_end_all_unfinished_shifts(
-                    chat_id, now, target_date, business_today
-                )
-            )
+        if not isinstance(results[0], Exception):
+            force_stats = results[0]
             logger.info(
                 f"✅ 强制结束活动完成: {force_stats['success']}/{force_stats['total']}"
             )
-        except Exception as e:
-            logger.error(f"❌ [强制结束活动] 失败: {e}")
+        else:
+            logger.error(f"❌ [强制结束活动] 失败: {results[0]}")
             logger.error(traceback.format_exc())
-        watchdog.feed()
 
-        # ===== 🎯 修复点3：添加详细日志，记录补全的下班记录 =====
-        if complete_stats["details"]:
-            logger.info("📝 已补全的下班记录详情:")
-            for detail in complete_stats["details"]:
-                if detail.get("success"):
-                    logger.info(
-                        f"   ✅ 用户{detail['user_id']} {detail['shift']}班次 "
-                        f"下班时间:{detail.get('work_end_time', '未知')} "
-                        f"罚款:{detail.get('fine', 0)}"
-                    )
+        if not isinstance(results[1], Exception):
+            complete_stats = results[1]
+            logger.info(
+                f"✅ 补全下班记录完成: {complete_stats['success']}/{complete_stats['total']}"
+            )
+        else:
+            logger.error(f"❌ [补全下班记录] 失败: {results[1]}")
+            logger.error(traceback.format_exc())
 
         logger.info(f"📊 [步骤3/5] 导出目标日期数据...")
         export_start = time.time()
@@ -441,15 +434,11 @@ async def _dual_shift_hard_reset(
         logger.info(f"✅ [双班重置] 群组 {chat_id} 执行成功，已设置幂等标记")
 
         total_time = time.time() - total_start_time
-
-        # ===== 🎯 修复点4：在最终日志中添加上班/下班统计 =====
         logger.info(
             f"🎉 [双班硬重置完成] 群组 {chat_id}\n"
             f"   ├─ 目标日期: {target_date}\n"
-            f"   ├─ 补全下班记录: {complete_stats['success']}/{complete_stats['total']}\n"
-            f"   │   ├─ 白班: {complete_stats['day_shift']['success']}/{complete_stats['day_shift']['total']}\n"
-            f"   │   └─ 夜班: {complete_stats['night_shift']['success']}/{complete_stats['night_shift']['total']}\n"
-            f"   ├─ 强制结束活动: {force_stats['success']}/{force_stats['total']}\n"
+            f"   ├─ 强制结束: {force_stats['success']}/{force_stats['total']}\n"
+            f"   ├─ 补全下班: {complete_stats['success']}/{complete_stats['total']}\n"
             f"   ├─ 导出成功: {export_success}\n"
             f"   ├─ 清理记录: {cleanup_stats.get('user_activities', 0)}条\n"
             f"   ├─ 清除班次状态: {deleted_count}个\n"
@@ -934,7 +923,7 @@ async def _complete_missing_work_ends(
     return stats
 
 
-# ========== 修复版：优化版补全单个下班记录 ==========
+# ========== 新增：优化版补全单个下班记录 ==========
 async def _complete_single_work_end_optimized(
     chat_id: int,
     row: dict,
@@ -945,14 +934,13 @@ async def _complete_single_work_end_optimized(
     conn: Optional[asyncpg.Connection] = None,  # 可选：复用外部连接
 ) -> Dict[str, Any]:
     """
-    修复版：补全单个用户的下班记录 - 确保统计字段正确更新
+    优化版：补全单个用户的下班记录
 
     优化点：
     1. 支持复用外部连接（减少连接获取开销）
     2. 30秒超时保护
     3. 批量插入准备
     4. 详细的错误分类
-    5. ✅ 确保 daily_statistics 的 work_end_count 和 work_end_fines 正确更新
 
     Args:
         chat_id: 群组ID
@@ -971,42 +959,31 @@ async def _complete_single_work_end_optimized(
         "fine": 0,
         "duration": 0,
         "success": False,
-        "record_date": None,  # 新增：记录实际统计日期
     }
 
     # ===== 1. 超时控制 =====
     try:
         async with asyncio.timeout(30):  # 30秒超时
-            # ===== 2. 根据班次确定期望下班时间和统计日期 =====
+            # ===== 2. 根据班次确定期望下班时间和日期 =====
             if row["shift"] == "day":
                 expected_end_time = shift_config.get("day_end", "18:00")
-                # 白班：下班记录在当天
                 work_end_date = target_date
-                stats_record_date = target_date  # 统计日期 = 当天
             else:  # night
                 expected_end_time = shift_config.get("day_start", "09:00")
-                # 夜班：下班记录在第二天
                 work_end_date = target_date + timedelta(days=1)
-                stats_record_date = target_date + timedelta(days=1)  # 统计日期 = 第二天
-
-            result["record_date"] = stats_record_date
 
             # ===== 3. 解析时间（带异常保护）=====
             try:
                 work_start_time = datetime.strptime(
                     row["work_start_time"], "%H:%M"
                 ).time()
-
                 expected_end_dt = datetime.combine(
                     work_end_date, datetime.strptime(expected_end_time, "%H:%M").time()
                 )
                 auto_end_dt = datetime.combine(
                     work_end_date, datetime.strptime(auto_end_time, "%H:%M").time()
                 )
-                work_start_dt = datetime.combine(
-                    target_date if row["shift"] == "day" else target_date,
-                    work_start_time,
-                )
+                work_start_dt = datetime.combine(target_date, work_start_time)
             except ValueError as e:
                 logger.error(f"时间解析失败: {e}")
                 result["error"] = f"时间解析失败: {e}"
@@ -1016,10 +993,10 @@ async def _complete_single_work_end_optimized(
             time_diff_seconds = int((auto_end_dt - expected_end_dt).total_seconds())
             time_diff_minutes = time_diff_seconds / 60
 
-            # 罚款计算（早退才罚款）
+            # 罚款计算优化：使用二分查找或预计算
             fine_amount = 0
             if time_diff_seconds < 0 and work_fine_rates:
-                # 将阈值转为整数并排序
+                # 将阈值转为整数并排序（缓存结果）
                 thresholds = sorted([int(k) for k in work_fine_rates.keys()])
                 abs_minutes = abs(time_diff_minutes)
 
@@ -1040,14 +1017,15 @@ async def _complete_single_work_end_optimized(
             else:
                 status = "✅ 自动下班（准时）"
 
-            # ===== 6. 数据库操作（修复版 - 确保统计正确）=====
+            # ===== 6. 数据库操作（连接复用）=====
+            # 判断是使用传入的连接还是新建连接
             if conn:
                 # 复用外部连接
-                await _execute_work_end_operations_fixed(
+                await _execute_work_end_operations(
                     conn,
                     chat_id,
                     row,
-                    stats_record_date,  # 传入统计日期
+                    target_date,
                     auto_end_time,
                     status,
                     time_diff_minutes,
@@ -1057,11 +1035,11 @@ async def _complete_single_work_end_optimized(
             else:
                 # 新建独立连接
                 async with db.pool.acquire() as new_conn:
-                    await _execute_work_end_operations_fixed(
+                    await _execute_work_end_operations(
                         new_conn,
                         chat_id,
                         row,
-                        stats_record_date,
+                        target_date,
                         auto_end_time,
                         status,
                         time_diff_minutes,
@@ -1077,9 +1055,8 @@ async def _complete_single_work_end_optimized(
             logger.info(
                 f"✅ [补全下班] 用户{row['user_id']} | "
                 f"班次:{row['shift']} | 上班:{row['work_start_time']} | "
-                f"自动下班:{auto_end_time} | 统计日期:{stats_record_date} | "
-                f"罚款:{fine_amount} | 时长:{work_duration//60}分钟 | "
-                f"下班次数+1"
+                f"自动下班:{auto_end_time} | 罚款:{fine_amount} | "
+                f"时长:{work_duration//60}分钟"
             )
 
     except asyncio.TimeoutError:
@@ -1107,136 +1084,6 @@ async def _complete_single_work_end_optimized(
         raise  # 不可重试的错误直接抛出
 
     return result
-
-
-# ===== 修复版辅助函数：执行具体数据库操作（确保统计正确）=====
-async def _execute_work_end_operations_fixed(
-    conn: asyncpg.Connection,
-    chat_id: int,
-    row: dict,
-    stats_record_date: date,  # 统计日期（白班=当天，夜班=第二天）
-    auto_end_time: str,
-    status: str,
-    time_diff_minutes: float,
-    fine_amount: int,
-    work_duration: int,
-):
-    """
-    修复版：执行下班补全的数据库操作（确保 work_end_count 和 work_end_fines 正确更新）
-    """
-    async with conn.transaction():
-        # 1. 插入 work_records
-        await conn.execute(
-            """
-            INSERT INTO work_records
-            (chat_id, user_id, record_date, checkin_type, checkin_time, 
-             status, time_diff_minutes, fine_amount, shift, shift_detail)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """,
-            chat_id,
-            row["user_id"],
-            stats_record_date,  # 使用正确的统计日期
-            "work_end",
-            auto_end_time,
-            status,
-            time_diff_minutes,
-            fine_amount,
-            row["shift"],
-            row.get("shift_detail", row["shift"]),
-        )
-
-        # 2. ✅ 修复点：确保 daily_statistics 的 work_end_count 正确累加
-        await conn.execute(
-            """
-            INSERT INTO daily_statistics 
-            (chat_id, user_id, record_date, shift,
-             work_end_count, work_end_fines, work_hours, work_days)
-            VALUES ($1, $2, $3, $4, 1, $5, $6, 1)
-            ON CONFLICT (chat_id, user_id, record_date, shift) 
-            DO UPDATE SET
-                work_end_count = daily_statistics.work_end_count + 1,
-                work_end_fines = daily_statistics.work_end_fines + $5,
-                work_hours = daily_statistics.work_hours + $6,
-                work_days = daily_statistics.work_days + 1,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            chat_id,
-            row["user_id"],
-            stats_record_date,
-            row["shift"],
-            fine_amount,
-            work_duration,
-        )
-
-        # 3. 如果是夜班，还要确保上班那天的记录存在（用于工作天数统计）
-        if row["shift"] == "night":
-            # 上班日期 = target_date（即参数中传入的 target_date）
-            work_start_date = (
-                row["record_date"]
-                if "record_date" in row
-                else stats_record_date - timedelta(days=1)
-            )
-
-            await conn.execute(
-                """
-                INSERT INTO daily_statistics 
-                (chat_id, user_id, record_date, shift, work_days)
-                VALUES ($1, $2, $3, $4, 1)
-                ON CONFLICT (chat_id, user_id, record_date, shift) 
-                DO NOTHING
-                """,
-                chat_id,
-                row["user_id"],
-                work_start_date,
-                row["shift"],
-            )
-
-        # 4. 如果有罚款，更新月度统计
-        if fine_amount > 0:
-            # 计算统计月份
-            statistic_date = stats_record_date.replace(day=1)
-
-            await conn.execute(
-                """
-                INSERT INTO monthly_statistics 
-                (chat_id, user_id, statistic_date, shift, work_end_fines, updated_at)
-                VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-                ON CONFLICT (chat_id, user_id, statistic_date, shift)
-                DO UPDATE SET
-                    work_end_fines = monthly_statistics.work_end_fines + $5,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                chat_id,
-                row["user_id"],
-                statistic_date,
-                row["shift"],
-                fine_amount,
-            )
-
-        # 5. 更新用户总罚款
-        if fine_amount > 0:
-            await conn.execute(
-                """
-                UPDATE users
-                SET total_fines = total_fines + $1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = $2 AND user_id = $3
-                """,
-                fine_amount,
-                chat_id,
-                row["user_id"],
-            )
-
-        # 6. 清理缓存
-        cache_key = f"user:{chat_id}:{row['user_id']}"
-        if hasattr(db, "_cache"):
-            db._cache.pop(cache_key, None)
-            db._cache_ttl.pop(cache_key, None)
-
-        logger.debug(
-            f"📊 [统计更新] 用户{row['user_id']} {row['shift']}班次 "
-            f"日期:{stats_record_date} 下班次数+1 罚款:{fine_amount}"
-        )
 
 
 # ===== 辅助函数：执行具体数据库操作 =====
@@ -1274,52 +1121,41 @@ async def _execute_work_end_operations(
             row.get("shift_detail", row["shift"]),
         )
 
-        # 2. 确保 daily_statistics 记录存在
+        # 2. 更新日统计（使用 upsert）
         await conn.execute(
             """
-            INSERT INTO daily_statistics (chat_id, user_id, record_date, shift)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (chat_id, user_id, record_date, shift) DO NOTHING
+            INSERT INTO daily_statistics
+            (chat_id, user_id, record_date, activity_name, accumulated_time, shift)
+            VALUES ($1, $2, $3, 'work_hours', $4, $5)
+            ON CONFLICT (chat_id, user_id, record_date, activity_name, shift)
+            DO UPDATE SET
+                accumulated_time = daily_statistics.accumulated_time + EXCLUDED.accumulated_time,
+                updated_at = CURRENT_TIMESTAMP
             """,
             chat_id,
             row["user_id"],
             target_date,
+            work_duration,
             row["shift"],
         )
 
-        # 3. 更新工作时长
-        if work_duration > 0:
-            await conn.execute(
-                """
-                UPDATE daily_statistics
-                SET work_hours = work_hours + $5,
-                    work_days = work_days + 1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = $1 AND user_id = $2 
-                  AND record_date = $3 AND shift = $4
-                """,
-                chat_id,
-                row["user_id"],
-                target_date,
-                row["shift"],
-                work_duration,
-            )
-
-        # 4. 如果有罚款，更新罚款统计
+        # 3. 如果有罚款，更新罚款统计
         if fine_amount > 0:
             await conn.execute(
                 """
-                UPDATE daily_statistics
-                SET work_end_fines = work_end_fines + $5,
+                INSERT INTO daily_statistics
+                (chat_id, user_id, record_date, activity_name, accumulated_time, shift)
+                VALUES ($1, $2, $3, 'work_end_fines', $4, $5)
+                ON CONFLICT (chat_id, user_id, record_date, activity_name, shift)
+                DO UPDATE SET
+                    accumulated_time = daily_statistics.accumulated_time + EXCLUDED.accumulated_time,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = $1 AND user_id = $2 
-                  AND record_date = $3 AND shift = $4
                 """,
                 chat_id,
                 row["user_id"],
                 target_date,
-                row["shift"],
                 fine_amount,
+                row["shift"],
             )
 
 
@@ -1728,7 +1564,7 @@ async def recover_shift_states():
 
                 if not db.pool or not db._initialized:
                     logger.error("数据库连接池未初始化")
-                    return 0
+                    return
 
                 async with db.pool.acquire() as conn:
                     rows = await conn.fetch(
