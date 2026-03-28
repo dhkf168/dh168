@@ -4,7 +4,7 @@ import logging
 import asyncio
 import time
 from datetime import datetime, date, timedelta, time as dt_time
-from typing import Dict, Optional, Tuple, Any, List
+from typing import Dict, Optional, Tuple, Any, List, Union
 
 from database import db
 from config import beijing_tz, Config
@@ -840,93 +840,121 @@ class HandoverManager:
         self,
         chat_id: int,
         user_id: int,
-        activity: str,
-        shift: str,
+        activity: Union[str, List[str]],
+        shift: Optional[str] = None,
+        query_date: Optional[date] = None,
         current_time: Optional[datetime] = None,
-    ) -> int:
-        """
-        获取用户在当前周期的活动计数
+    ) -> Union[int, Dict[str, int]]:
 
-        关键：在换班日，12小时后计数重置
-        """
         if current_time is None:
             current_time = db.get_beijing_time()
 
-        # 获取当前时期信息
-        period = await self.determine_current_period(chat_id, current_time)
+        # ===== 1. 参数处理 =====
+        if isinstance(activity, str):
+            activities = [activity]
+            single_mode = True
+        elif isinstance(activity, list) and all(isinstance(a, str) for a in activity):
+            activities = activity
+            single_mode = False
+        else:
+            raise TypeError("activity 必须是 str 或 List[str]")
 
-        # 查询该业务日期的所有计数
-        all_counts = await db.get_user_activity_count_by_shift(
-            chat_id, user_id, activity, shift, query_date=period["business_date"]
-        )
+        if shift is not None and not isinstance(shift, str):
+            raise TypeError("shift 必须是字符串或 None")
+        if query_date is not None and not isinstance(query_date, date):
+            raise TypeError("query_date 必须是 date 类型或 None")
 
-        if not period["is_handover"]:
-            # 非换班日，直接返回
-            logger.debug(f"📊 [计数] 正常日: {all_counts}")
-            return all_counts
-
-        # 换班日，获取当前周期
-        cycle_data = await self.get_user_cycle(
-            chat_id,
-            user_id,
-            period["business_date"],
-            period["period_type"],
-            period["cycle"],
-        )
-
-        if period["cycle"] == 1:
-            # 周期1：返回所有计数（周期2还未开始）
+        # ===== 2. 获取业务日期 =====
+        if query_date:
+            target_date = query_date
+            logger.debug(f"📅 使用传入查询日期: {target_date}")
+        else:
+            period = await self.determine_current_period(chat_id, current_time)
+            target_date = period["business_date"]
             logger.debug(
-                f"🔄 [计数-周期1] 业务日期 {period['business_date']}, 计数: {all_counts}"
+                f"📅 使用换班业务日期: {target_date}, "
+                f"period_type={period.get('period_type')}, "
+                f"is_handover={period.get('is_handover')}"
             )
-            return all_counts
 
-        # 周期2：计数重置
-        logger.debug(f"🔄 [计数-周期2] 业务日期 {period['business_date']}, 计数重置")
+        # ===== 3. 规范化班次 =====
+        final_shift = None
+        if shift:
+            shift_clean = shift.strip().lower()
+            if shift_clean.startswith("night"):
+                final_shift = "night"
+            elif shift_clean == "day":
+                final_shift = "day"
 
-        # ===== 防御性检查（不会影响主逻辑）=====
-        try:
-            if cycle_data and cycle_data.get("cycle_start_time"):
-                cycle_start = cycle_data["cycle_start_time"]
+        # ===== 4. 批量查询数据库 =====
+        result = {}
+        if activities:
+            params = [chat_id, user_id, target_date, activities]
+            query_sql = """
+                SELECT activity_name, SUM(activity_count) AS total_count
+                FROM user_activities
+                WHERE chat_id = $1 
+                  AND user_id = $2 
+                  AND activity_date = $3
+                  AND activity_name = ANY($4::text[])
+            """
+            if final_shift:
+                query_sql += " AND shift = $5"
+                params.append(final_shift)
+            query_sql += " GROUP BY activity_name"
 
-                # 统一解析时间
-                if isinstance(cycle_start, str):
-                    try:
-                        cycle_start = datetime.fromisoformat(
-                            cycle_start.replace("Z", "+00:00")
-                        )
-                    except Exception:
-                        cycle_start = None
+            try:
+                rows = await db.execute_with_retry(
+                    f"获取活动次数({len(activities)}个)",
+                    query_sql,
+                    *params,
+                    fetch=True,
+                    slow_threshold=0.5,
+                )
 
-                # 如果解析成功再计算
-                if isinstance(cycle_start, datetime):
-                    # 统一时区避免错误
-                    if cycle_start.tzinfo and current_time.tzinfo is None:
-                        current_time = current_time.replace(tzinfo=cycle_start.tzinfo)
+                # 组装查询结果
+                found = set()
+                for row in rows:
+                    act_name = row["activity_name"]
+                    count = row["total_count"] or 0
+                    result[act_name] = count
+                    found.add(act_name)
 
-                    time_since_start = (
-                        current_time - cycle_start
-                    ).total_seconds() / 3600
+                # 未找到的活动默认 0
+                for act_name in activities:
+                    if act_name not in found:
+                        result[act_name] = 0
 
-                    # 周期2刚开始的提示
-                    if 0 <= time_since_start < 1:
-                        logger.info(
-                            f"ℹ️ 周期2刚开始 {time_since_start:.2f}小时 "
-                            f"user={user_id} date={period['business_date']}"
-                        )
+            except Exception as e:
+                logger.error(f"❌ 获取活动次数失败: {e}")
+                # 出错时所有活动返回0
+                for act_name in activities:
+                    result[act_name] = 0
 
-                    # 时间异常检测
-                    if time_since_start < 0:
-                        logger.warning(
-                            f"⚠️ 周期时间异常 "
-                            f"user={user_id} start={cycle_start} now={current_time}"
-                        )
+        # ===== 5. 换班日周期处理 =====
+        if query_date is None:
+            # 重新获取 period（如果之前没有，或者需要周期信息）
+            if "period" not in locals():
+                period = await self.determine_current_period(chat_id, current_time)
 
-        except Exception as check_error:
-            # 防御：绝不影响主流程
-            logger.debug(f"周期检查失败: {check_error}")
+            if period.get("is_handover", False):
+                if period.get("cycle") == 1:
+                    # 周期1：返回所有计数
+                    logger.debug(
+                        f"🔄 [计数-周期1] 业务日期 {target_date}, 计数: {result}"
+                    )
+                else:
+                    # 周期2：计数重置
+                    logger.debug(f"🔄 [计数-周期2] 业务日期 {target_date}, 计数重置")
+                    for act_name in activities:
+                        result[act_name] = 0
+            else:
+                logger.debug(f"📊 [计数] 正常日: {result}")
 
-        # ==
+        # ===== 6. 返回结果 =====
+        if single_mode:
+            return result[activities[0]]
+        return result
 
     async def record_activity(
         self,
