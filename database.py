@@ -776,6 +776,9 @@ class PostgreSQLDatabase:
                     activity_start_time TEXT,
                     shift TEXT DEFAULT 'day',
                     checkin_message_id BIGINT DEFAULT NULL,
+                    last_user_activity_message_id BIGINT DEFAULT NULL,
+                    last_bot_reply_message_id BIGINT DEFAULT NULL,
+                    checkin_message_id BIGINT DEFAULT NULL,
                     total_accumulated_time INTEGER DEFAULT 0,
                     total_activity_count INTEGER DEFAULT 0,
                     total_fines INTEGER DEFAULT 0,
@@ -1953,6 +1956,102 @@ class PostgreSQLDatabase:
                 user_id,
             )
         self._cache.pop(f"user:{chat_id}:{user_id}", None)
+
+    async def update_last_user_activity_message_id(
+        self, chat_id: int, user_id: int, message_id: int
+    ):
+        """更新用户最后的活动消息ID（用于下次活动引用）"""
+        self._ensure_pool_initialized()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE users 
+                SET last_user_activity_message_id = $1, updated_at = CURRENT_TIMESTAMP 
+                WHERE chat_id = $2 AND user_id = $3
+                """,
+                message_id,
+                chat_id,
+                user_id,
+            )
+        cache_key = f"user:{chat_id}:{user_id}"
+        self._cache.pop(cache_key, None)
+        self._cache_ttl.pop(cache_key, None)
+
+    async def get_last_user_activity_message_id(
+        self, chat_id: int, user_id: int
+    ) -> Optional[int]:
+        """获取用户最后的活动消息ID"""
+        user_data = await self.get_user_cached(chat_id, user_id)
+        if user_data:
+            return user_data.get("last_user_activity_message_id")
+        return None
+
+    async def update_last_bot_reply_message_id(
+        self, chat_id: int, user_id: int, message_id: int, is_checkin: bool = True
+    ):
+        """
+        更新机器人最后的回复消息ID
+        is_checkin=True: 打卡消息，用于下次回座引用
+        is_checkin=False: 回座消息，用于下次活动引用
+        """
+        self._ensure_pool_initialized()
+        async with self.pool.acquire() as conn:
+            if is_checkin:
+                # 打卡消息：保存到 checkin_message_id
+                await conn.execute(
+                    """
+                    UPDATE users 
+                    SET checkin_message_id = $1, updated_at = CURRENT_TIMESTAMP 
+                    WHERE chat_id = $2 AND user_id = $3
+                    """,
+                    message_id,
+                    chat_id,
+                    user_id,
+                )
+            else:
+                # 回座消息：保存到 last_bot_reply_message_id
+                await conn.execute(
+                    """
+                    UPDATE users 
+                    SET last_bot_reply_message_id = $1, updated_at = CURRENT_TIMESTAMP 
+                    WHERE chat_id = $2 AND user_id = $3
+                    """,
+                    message_id,
+                    chat_id,
+                    user_id,
+                )
+        cache_key = f"user:{chat_id}:{user_id}"
+        self._cache.pop(cache_key, None)
+        self._cache_ttl.pop(cache_key, None)
+
+    async def get_last_bot_reply_message_id(
+        self, chat_id: int, user_id: int
+    ) -> Optional[int]:
+        """获取机器人最后的回复消息ID（回座消息）"""
+        user_data = await self.get_user_cached(chat_id, user_id)
+        if user_data:
+            return user_data.get("last_bot_reply_message_id")
+        return None
+
+    async def clear_user_message_ids(self, chat_id: int, user_id: int):
+        """清除用户的所有消息ID（可选，用于重置）"""
+        self._ensure_pool_initialized()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE users 
+                SET checkin_message_id = NULL,
+                    last_user_activity_message_id = NULL,
+                    last_bot_reply_message_id = NULL,
+                    updated_at = CURRENT_TIMESTAMP 
+                WHERE chat_id = $1 AND user_id = $2
+                """,
+                chat_id,
+                user_id,
+            )
+        cache_key = f"user:{chat_id}:{user_id}"
+        self._cache.pop(cache_key, None)
+        self._cache_ttl.pop(cache_key, None)
 
     # ====== 核心业务方法 ======
     async def complete_user_activity(

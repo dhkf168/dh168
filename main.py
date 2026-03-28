@@ -1303,6 +1303,9 @@ async def start_activity(message: types.Message, act: str):
             # 喂狗
             watchdog.feed()
 
+            last_bot_reply_id = await db.get_last_bot_reply_message_id(chat_id, uid)
+            logger.info(f"🔍 获取上次机器人回座消息ID: {last_bot_reply_id}")
+
             shift_info = await db.determine_shift_for_time(
                 chat_id=chat_id,
                 current_time=now,
@@ -1369,15 +1372,43 @@ async def start_activity(message: types.Message, act: str):
                 )
                 return
 
+            # ========== ✅ 1. 先发送用户消息（引用上次机器人回座消息）==========
+            if last_bot_reply_id:
+                try:
+                    # 引用上一次机器人的回座消息
+                    user_message = await message.answer(
+                        act, reply_to_message_id=last_bot_reply_id, reply_markup=None
+                    )
+                    logger.info(
+                        f"✅ 用户活动消息引用机器人回座消息: {last_bot_reply_id}"
+                    )
+                except Exception as e:
+                    logger.warning(f"引用失败: {e}，普通发送")
+                    user_message = await message.answer(act)
+            else:
+                user_message = await message.answer(act)
+
+            # 保存用户活动消息ID
+            await db.update_last_user_activity_message_id(
+                chat_id, uid, user_message.message_id
+            )
+            logger.info(f"📝 用户发送活动消息，消息ID: {user_message.message_id}")
+            # ========== ✅ 用户消息发送结束 ==========
+
+            # ========== ✅ 2. 更新用户活动状态 ==========
             await db.update_user_activity(
                 chat_id, uid, act, str(now), name, current_shift
             )
+            # ========== ✅ 状态更新结束 ==========
 
+            # ========== ✅ 3. 启动定时器 ==========
             time_limit = await db.get_activity_time_limit(act)
             await timer_manager.start_timer(
                 chat_id, uid, act, time_limit, shift=current_shift
             )
+            # ========== ✅ 定时器启动结束 ==========
 
+            # ========== ✅ 4. 发送机器人打卡消息（引用用户刚发的消息）==========
             sent_message = await message.answer(
                 MessageFormatter.format_activity_message(
                     uid,
@@ -1392,11 +1423,30 @@ async def start_activity(message: types.Message, act: str):
                 reply_markup=await get_main_keyboard(
                     chat_id=chat_id, show_admin=await is_admin(uid)
                 ),
-                reply_to_message_id=message.message_id,
+                reply_to_message_id=user_message.message_id,  # ✅ 引用用户活动消息
                 parse_mode="HTML",
             )
+            # ========== ✅ 机器人消息发送结束 ==========
 
+            # ========== ✅ 5. 保存机器人消息ID ==========
             await db.update_user_checkin_message(chat_id, uid, sent_message.message_id)
+
+            # 保存机器人打卡消息到 last_bot_reply_message_id（用于下次回座引用）
+            await db.update_last_bot_reply_message_id(
+                chat_id, uid, sent_message.message_id, is_checkin=True
+            )
+            # ========== ✅ 保存结束 ==========
+
+            # ========== ✅ 6. 统一日志输出 ==========
+            logger.info(
+                f"📝 用户 {uid} 开始活动 {act}（{shift_text}）\n"
+                f"    ├─ 用户活动消息ID: {user_message.message_id}\n"
+                f"    ├─ 机器人打卡消息ID: {sent_message.message_id}\n"
+                f"    ├─ 记录日期: {record_date}\n"
+                f"    ├─ 班次详情: {shift_detail}\n"
+                f"    └─ 引用关系: 用户消息引用{last_bot_reply_id} → 机器人引用用户消息"
+            )
+            # ========== ✅ 日志结束 ==========
 
             logger.info(
                 f"📝 用户 {uid} 开始活动 {act}（{shift_text}），消息ID: {sent_message.message_id}, "
@@ -1771,19 +1821,43 @@ async def _process_back_locked(
             fine_amount=fine_amount,
         )
 
-        send_success = False
+        # ========== ✅ 1. 先发送用户回座消息（引用机器人打卡消息）==========
         if checkin_message_id:
+            try:
+                # 发送用户回座消息，引用机器人打卡消息
+                user_back_message = await message.answer(
+                    "回座",
+                    reply_to_message_id=checkin_message_id,  # ✅ 引用机器人打卡消息
+                    reply_markup=None,
+                )
+                logger.info(f"✅ 用户回座消息引用机器人打卡消息: {checkin_message_id}")
+            except Exception as e:
+                logger.warning(f"引用失败: {e}，普通发送")
+                user_back_message = await message.answer("回座")
+        else:
+            user_back_message = await message.answer("回座")
+
+        # 保存用户回座消息ID（可选，用于调试）
+        # await db.update_last_user_back_message_id(chat_id, uid, user_back_message.message_id)
+        logger.info(f"📝 用户发送回座消息，消息ID: {user_back_message.message_id}")
+        # ========== ✅ 用户回座消息发送结束 ==========
+
+        # ========== ✅ 2. 发送机器人回座消息（引用用户刚发的回座消息）==========
+        send_success = False
+        if user_back_message:
             try:
                 await message.answer(
                     back_message,
-                    reply_to_message_id=checkin_message_id,
+                    reply_to_message_id=user_back_message.message_id,  # ✅ 引用用户回座消息
                     reply_markup=await get_main_keyboard(
                         chat_id=chat_id, show_admin=await is_admin(uid)
                     ),
                     parse_mode="HTML",
                 )
                 send_success = True
-                logger.info(f"✅ 成功引用回复到消息 {checkin_message_id}")
+                logger.info(
+                    f"✅ 机器人回座消息引用用户回座消息: {user_back_message.message_id}"
+                )
             except Exception as e:
                 error_msg = str(e).lower()
                 if any(
@@ -1796,11 +1870,12 @@ async def _process_back_locked(
                     ]
                 ):
                     logger.warning(
-                        f"⚠️ 打卡消息 {checkin_message_id} 不可用，降级普通回复"
+                        f"⚠️ 用户回座消息 {user_back_message.message_id} 不可用，降级普通回复"
                     )
                 else:
                     logger.error(f"❌ 引用回复未知错误: {e}")
                     raise
+        # ========== ✅ 机器人回座消息发送结束 ==========
 
         if not send_success:
             await message.answer(
@@ -1812,6 +1887,17 @@ async def _process_back_locked(
                 reply_to_message_id=message.message_id,
             )
             logger.info(f"ℹ️ 降级发送回座消息，没有引用打卡消息")
+
+        # ========== ✅ 3. 保存机器人回座消息ID（用于下次活动引用）==========
+        if send_success and user_back_message:
+            # 保存机器人回座消息到 last_bot_reply_message_id（用于下次活动引用）
+            await db.update_last_bot_reply_message_id(
+                chat_id, uid, user_back_message.message_id, is_checkin=False
+            )
+            logger.info(
+                f"📝 保存机器人回座消息ID: {user_back_message.message_id}，用于下次活动引用"
+            )
+        # ========== ✅ 保存结束 ==========
 
         if is_overtime and fine_amount > 0:
             group_data = await db.get_group_cached(chat_id)
