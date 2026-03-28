@@ -778,7 +778,6 @@ class PostgreSQLDatabase:
                     checkin_message_id BIGINT DEFAULT NULL,
                     last_user_activity_message_id BIGINT DEFAULT NULL,
                     last_bot_reply_message_id BIGINT DEFAULT NULL,
-                    checkin_message_id BIGINT DEFAULT NULL,
                     total_accumulated_time INTEGER DEFAULT 0,
                     total_activity_count INTEGER DEFAULT 0,
                     total_fines INTEGER DEFAULT 0,
