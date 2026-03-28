@@ -3167,6 +3167,20 @@ async def send_work_notification(
             except Exception as e:
                 logger.error(f"[{trace_id}] ❌ 计算工作时长失败: {e}")
 
+        if fine_amount > 0:
+            if action_text == "上班" and diff_seconds > 0:
+                channel_notif_text += (
+                    f"\n💰 <b>罚款信息</b>\n"
+                    f"⚠️ 迟到 {MessageFormatter.format_duration(diff_seconds)}\n"
+                    f"💸 罚款金额：<code>{fine_amount}</code> 泰铢\n"
+                )
+            elif action_text == "下班" and diff_seconds < 0:
+                channel_notif_text += (
+                    f"\n💰 <b>罚款信息</b>\n"
+                    f"⚠️ 早退 {MessageFormatter.format_duration(abs(diff_seconds))}\n"
+                    f"💸 罚款金额：<code>{fine_amount}</code> 泰铢\n"
+                )
+
         channel_notif_text += f"{status_line}"
 
         extra_notif_text = f"<code>{shift_text}</code> {MessageFormatter.format_user_link(user_id, user_name)} {action_text} 了！\n"
@@ -7404,124 +7418,6 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
         return []
 
 
-def create_excel_workbook(
-    group_stats, all_activities, headers, chat_title, working_target_date
-):
-    """
-    创建 Excel 工作簿并格式化
-    返回 BytesIO 对象
-    """
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-
-    # 创建工作簿
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "打卡统计"
-
-    # 定义颜色
-    HEADER_FILL = PatternFill(
-        start_color="4472C4", end_color="4472C4", fill_type="solid"
-    )  # 蓝色标题
-    HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
-    DATA_FONT = Font(size=10)
-    EMPTY_FILL = PatternFill(
-        start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
-    )  # 淡红色背景
-    BORDER = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
-    )
-
-    # 写入表头
-    for col_idx, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = BORDER
-
-    # 写入数据
-    for row_idx, user_data in enumerate(group_stats, 2):
-        activities = user_data.get("activities", {})
-
-        # 构建行数据
-        row_data = [
-            user_data.get("user_id", "未知"),
-            user_data.get("nickname", "未知用户"),
-            format_shift_for_export(user_data.get("shift", "day")),
-            format_export_value(user_data.get("work_days", 0)),
-            format_export_value(user_data.get("work_start_count", 0)),
-            format_export_value(user_data.get("work_end_count", 0)),
-            format_export_value(user_data.get("work_hours", 0), is_time=True),
-        ]
-
-        # 活动数据
-        for act in all_activities:
-            activity_info = activities.get(act, {})
-            row_data.append(format_export_value(activity_info.get("count", 0)))
-            row_data.append(
-                format_export_value(activity_info.get("time", 0), is_time=True)
-            )
-
-        # 统计数据
-        row_data.extend(
-            [
-                format_export_value(user_data.get("total_activity_count", 0)),
-                format_export_value(
-                    user_data.get("total_accumulated_time", 0), is_time=True
-                ),
-                format_export_value(user_data.get("overtime_count", 0)),
-                format_export_value(
-                    user_data.get("total_overtime_time", 0), is_time=True
-                ),
-                format_export_value(user_data.get("early_count", 0)),
-                format_export_value(user_data.get("late_count", 0)),
-                format_export_value(user_data.get("work_end_fines", 0)),
-                format_export_value(user_data.get("work_start_fines", 0)),
-                format_export_value(user_data.get("total_fines", 0)),
-            ]
-        )
-
-        # 写入每个单元格并应用样式
-        for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            cell.font = DATA_FONT
-            cell.border = BORDER
-            cell.alignment = Alignment(
-                horizontal="center" if isinstance(value, (int, float)) else "left"
-            )
-
-            # 如果值为 "-"（空数据），添加淡红色背景
-            if value == "-":
-                cell.fill = EMPTY_FILL
-
-    # 自动调整列宽
-    for col_idx, col in enumerate(ws.columns, 1):
-        max_length = 0
-        column_letter = get_column_letter(col_idx)
-        for cell in col:
-            try:
-                if cell.value:
-                    max_length = max(max_length, len(str(cell.value)))
-            except:
-                pass
-        adjusted_width = min(max_length + 2, 30)  # 最大宽度限制为 30
-        ws.column_dimensions[column_letter].width = adjusted_width
-
-    # 冻结首行
-    ws.freeze_panes = "A2"
-
-    # 保存到 BytesIO
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-
-    return output
-
-
 async def export_and_push_csv(
     chat_id: int,
     to_admin_if_no_group: bool = True,
@@ -7576,6 +7472,7 @@ async def export_and_push_csv(
         try:
             await db.init_group(local_chat_id)
 
+            # ========== 辅助函数定义 ==========
             def safe_int(value, default=0):
                 """安全转换为整数"""
                 if value is None:
@@ -7627,17 +7524,13 @@ async def export_and_push_csv(
                     return str(value)
 
             def is_row_empty(row_data, exclude_indices=None):
-                """
-                判断整行数据是否为空（除了用户ID、昵称、班次）
-                exclude_indices: 排除的列索引（用户ID、昵称、班次）
-                """
+                """判断整行数据是否为空（除了指定的排除列）"""
                 if exclude_indices is None:
                     exclude_indices = {0, 1, 2}  # 排除用户ID、昵称、班次
 
                 for idx, value in enumerate(row_data):
                     if idx in exclude_indices:
                         continue
-                    # 如果任何非排除字段不是 "-"，则行不为空
                     if value != "-":
                         return False
                 return True
@@ -7655,15 +7548,21 @@ async def export_and_push_csv(
                 # 定义颜色
                 HEADER_FILL = PatternFill(
                     start_color="4472C4", end_color="4472C4", fill_type="solid"
-                )
+                )  # 蓝色标题
                 HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
                 DATA_FONT = Font(size=10)
+
+                # ===== 新增：行背景色 =====
+                HAS_FINE_FILL = PatternFill(
+                    start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"
+                )  # 淡黄色（有罚款）
+                NO_FINE_FILL = PatternFill(
+                    start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"
+                )  # 淡绿色（无罚款）
                 EMPTY_ROW_FILL = PatternFill(
                     start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
-                )  # 淡红色
-                NORMAL_FILL = PatternFill(
-                    start_color="FFFFFF", end_color="FFFFFF", fill_type="solid"
-                )  # 白色
+                )  # 淡红色（完全空数据）
+
                 BORDER = Border(
                     left=Side(style="thin"),
                     right=Side(style="thin"),
@@ -7679,10 +7578,17 @@ async def export_and_push_csv(
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                     cell.border = BORDER
 
-                # 先构建所有行数据，再判断哪些行是空行
+                ws.row_dimensions[1].height = 21
+
+                # 先构建所有行数据
                 all_rows_data = []
                 for user_data in group_stats:
                     activities = user_data.get("activities", {})
+
+                    # 获取罚款总额
+                    total_fines = format_export_value(user_data.get("total_fines", 0))
+                    # 判断是否有罚款（排除 "-" 和 0）
+                    has_fine = total_fines != "-" and total_fines != "0"
 
                     # 构建行数据
                     row_data = [
@@ -7726,51 +7632,64 @@ async def export_and_push_csv(
                             format_export_value(user_data.get("late_count", 0)),
                             format_export_value(user_data.get("work_end_fines", 0)),
                             format_export_value(user_data.get("work_start_fines", 0)),
-                            format_export_value(user_data.get("total_fines", 0)),
+                            total_fines,  # 罚款总金额
                         ]
                     )
 
-                    all_rows_data.append(row_data)
+                    all_rows_data.append({"data": row_data, "has_fine": has_fine})
 
                 # 写入数据并应用样式
-                for row_idx, row_data in enumerate(all_rows_data, 2):
+                for row_idx, row_info in enumerate(all_rows_data, 2):
+                    row_data = row_info["data"]
+                    has_fine = row_info["has_fine"]
+
                     # 判断整行是否为空（除了用户ID、昵称、班次）
-                    is_empty_row = is_row_empty(row_data, exclude_indices={0, 1, 2})
+                    is_empty = is_row_empty(row_data, exclude_indices={0, 1, 2})
+
+                    # 确定行的背景色
+                    if is_empty:
+                        row_fill = EMPTY_ROW_FILL  # 淡红色 - 完全空数据
+                    elif has_fine:
+                        row_fill = HAS_FINE_FILL  # 淡黄色 - 有罚款
+                    else:
+                        row_fill = NO_FINE_FILL  # 淡绿色 - 无罚款
 
                     for col_idx, value in enumerate(row_data, 1):
                         cell = ws.cell(row=row_idx, column=col_idx, value=value)
                         cell.font = DATA_FONT
                         cell.border = BORDER
+                        cell.alignment = Alignment(
+                            horizontal="center", vertical="center"
+                        )
+                        cell.fill = row_fill
 
-                        # 数字居中对齐，文本左对齐
-                        if isinstance(value, (int, float)) or (
-                            isinstance(value, str) and value.replace("-", "").isdigit()
-                        ):
-                            cell.alignment = Alignment(
-                                horizontal="center", vertical="center"
-                            )
-                        else:
-                            cell.alignment = Alignment(
-                                horizontal="left", vertical="center"
-                            )
+                    ws.row_dimensions[row_idx].height = 21
 
-                        # 整行为空时，所有单元格都设置淡红色背景
-                        if is_empty_row:
-                            cell.fill = EMPTY_ROW_FILL
-                        else:
-                            cell.fill = NORMAL_FILL
-
-                # 自动调整列宽
+                # 自动调整列宽（优化版）
                 for col_idx, col in enumerate(ws.columns, 1):
                     max_length = 0
                     column_letter = get_column_letter(col_idx)
+
                     for cell in col:
                         try:
                             if cell.value:
-                                max_length = max(max_length, len(str(cell.value)))
+                                cell_value = str(cell.value)
+                                cell_length = len(cell_value)
+
+                                # 中文字符适当增加宽度
+                                chinese_count = sum(
+                                    1
+                                    for char in cell_value
+                                    if "\u4e00" <= char <= "\u9fff"
+                                )
+                                if chinese_count > 0:
+                                    cell_length = cell_length + chinese_count * 1.2
+
+                                max_length = max(max_length, cell_length)
                         except:
                             pass
-                    adjusted_width = min(max_length + 2, 30)
+
+                    adjusted_width = min(max(max_length + 2, 8), 120)
                     ws.column_dimensions[column_letter].width = adjusted_width
 
                 # 冻结首行
@@ -7782,6 +7701,8 @@ async def export_and_push_csv(
                 output.seek(0)
 
                 return output
+
+            # ========== 辅助函数定义结束 ==========
 
             beijing_now = db.get_beijing_time()
             current_hour = beijing_now.hour
@@ -7849,7 +7770,7 @@ async def export_and_push_csv(
                 f"🔍 [{operation_id}] 获取群组 {local_chat_id} 的统计数据，日期: {working_target_date}"
             )
 
-            # ===== 获取数据（保留原有 fallback 机制）=====
+            # ===== 获取数据 =====
             current_from_monthly_table = local_from_monthly_table
             if current_from_monthly_table:
                 logger.info(f"📊 [{operation_id}] 尝试从月度表获取数据")
@@ -7873,7 +7794,6 @@ async def export_and_push_csv(
 
             if not current_from_monthly_table:
                 try:
-                    # 使用 asyncio.gather 并发获取数据
                     activity_task = asyncio.create_task(db.get_activity_limits_cached())
                     stats_task = asyncio.create_task(
                         db.get_group_statistics(local_chat_id, working_target_date)
@@ -7925,8 +7845,6 @@ async def export_and_push_csv(
             for idx, user_data in enumerate(group_stats):
                 if not isinstance(user_data, dict):
                     continue
-
-                user_id = user_data.get("user_id", f"unknown_{idx}")
 
                 user_data["work_start_count"] = safe_int(
                     user_data.get("work_start_count", 0)
@@ -8021,7 +7939,7 @@ async def export_and_push_csv(
                 group_stats=group_stats, all_activities=all_activities, headers=headers
             )
 
-            # ===== 写入临时文件（使用异步写入 + fallback 机制）=====
+            # ===== 写入临时文件（异步写入 + fallback）=====
             temp_file = f"temp_{operation_id}_{current_file_name}"
 
             async def write_file_async():
