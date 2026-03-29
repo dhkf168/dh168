@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, date
 from datetime import time as dt_time
 from typing import Dict, Optional, List
 from contextlib import suppress
-from aiogram.types import BotCommand, BotCommandScopeAllChatAdministrators
+from aiogram.types import BotCommand, BotCommandScopeAllChatAdministrators, ForceReply
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +57,8 @@ from utils import (
     send_reset_notification,
     user_rate_limit,
     calculate_fine,
+    get_quote_id,
+    send_with_force_reply,
 )
 
 from fault_tolerance import (
@@ -819,14 +821,10 @@ async def can_perform_activities(
 
 # ========== 键盘生成 ==========
 async def get_main_keyboard(
-    chat_id: int = None,
-    show_admin: bool = False,
-    quote_message_id: int = None,  # ✅ 新增：要引用的消息ID
+    chat_id: int = None, show_admin: bool = False
 ) -> ReplyKeyboardMarkup:
     """获取主回复键盘"""
-    logger.debug(
-        f"🔄 生成键盘 - chat_id={chat_id}, show_admin={show_admin}, quote_id={quote_message_id}"
-    )
+    logger.debug(f"🔄 生成键盘 - chat_id={chat_id}, show_admin={show_admin}")
 
     try:
         activity_limits = await db.get_activity_limits_cached()
@@ -881,13 +879,11 @@ async def get_main_keyboard(
 
     keyboard = dynamic_buttons + fixed_buttons + bottom_buttons
 
-    # ✅ 设置默认引用
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
         one_time_keyboard=False,
         input_field_placeholder="请选择操作或输入活动名称...",
-        reply_to_message_id=quote_message_id,  # 如果为 None，则没有默认引用
     )
 
 
@@ -1237,27 +1233,23 @@ async def activity_timer(
             logger.error(f"❌ 定时器清理异常: {e}")
 
 
+# main.py - 在文件顶部添加导入
+from aiogram.types import ForceReply
+from utils import get_quote_id, send_with_force_reply
+
+
+# ========== 修改 start_activity 函数 ==========
 async def start_activity(message: types.Message, act: str):
-    """开始活动（带看门狗保护）"""
+    """开始活动（带 ForceReply 智能引用）"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
-    quote_id = None
-    if message.reply_to_message:
-        quote_id = message.reply_to_message.message_id
-        logger.info(f"📝 用户消息已引用: {quote_id}")
-    else:
-        quote_id = await db.get_last_back_message_id(chat_id, uid)
-        if quote_id:
-            logger.info(f"📝 使用上次回座消息作为引用: {quote_id}")
-
-    # 创建看门狗，30秒超时
     watchdog = Watchdog(timeout=30, name=f"start_activity_{chat_id}_{uid}")
 
     async def _start_activity_impl():
         user_lock = await user_lock_manager.get_lock(chat_id, uid)
         async with user_lock:
-            watchdog.feed()  # 喂狗
+            watchdog.feed()
 
             await reset_daily_data_if_needed(chat_id, uid)
 
@@ -1272,9 +1264,7 @@ async def start_activity(message: types.Message, act: str):
                 await message.answer(
                     Config.MESSAGES["has_activity"].format(current_act),
                     reply_markup=await get_main_keyboard(
-                        chat_id=chat_id,
-                        show_admin=await is_admin(uid),
-                        # 不传入 quote_message_id，因为这是错误消息
+                        chat_id=chat_id, show_admin=await is_admin(uid)
                     ),
                     reply_to_message_id=message.message_id,
                 )
@@ -1316,7 +1306,6 @@ async def start_activity(message: types.Message, act: str):
                 )
                 return
 
-            # 喂狗
             watchdog.feed()
 
             shift_info = await db.determine_shift_for_time(
@@ -1367,7 +1356,6 @@ async def start_activity(message: types.Message, act: str):
                     )
                     return
 
-            # 喂狗
             watchdog.feed()
 
             can_start, current_count, max_times = await check_activity_limit_by_shift(
@@ -1389,25 +1377,15 @@ async def start_activity(message: types.Message, act: str):
                 chat_id, uid, act, str(now), name, current_shift
             )
 
-            # ✅ 获取上一次机器人回座消息ID（用于按钮引用）
-            last_back_id = await db.get_last_back_message_id(chat_id, uid)
-            logger.info(f"📝 用户 {uid} 上次回座消息ID: {last_back_id}")
-
-            # ✅ 生成键盘时传入这个ID
-            keyboard = await get_main_keyboard(
-                chat_id=chat_id,
-                show_admin=await is_admin(uid),
-                quote_message_id=last_back_id,  # 让打卡按钮引用上次回座消息
-            )
-
             time_limit = await db.get_activity_time_limit(act)
             await timer_manager.start_timer(
                 chat_id, uid, act, time_limit, shift=current_shift
             )
 
-            # ✅ 发送打卡消息，机器人消息引用用户消息
-            sent_message = await message.answer(
-                MessageFormatter.format_activity_message(
+            # ✅ 使用 send_with_force_reply 发送打卡消息
+            sent_message = await send_with_force_reply(
+                message=message,
+                text=MessageFormatter.format_activity_message(
                     uid,
                     name,
                     act,
@@ -1417,25 +1395,18 @@ async def start_activity(message: types.Message, act: str):
                     time_limit,
                     current_shift,
                 ),
-                reply_markup=keyboard,  # 使用带引用的键盘
-                reply_to_message_id=quote_id
-                or message.message_id,  # ✅ 机器人消息引用用户消息
+                chat_id=chat_id,
+                user_id=uid,
+                db_instance=db,
                 parse_mode="HTML",
             )
 
-            # ✅ 保存机器人打卡消息ID（用于下次回座按钮引用）
+            # 同时保存打卡消息ID
             await db.update_user_checkin_message(chat_id, uid, sent_message.message_id)
-            await db.update_last_checkin_message_id(
-                chat_id, uid, sent_message.message_id
-            )
 
             logger.info(
-                f"📝 用户 {uid} 开始活动 {act}（{shift_text}）\n"
-                f"    ├─ 用户消息ID: {message.message_id}\n"
-                f"    ├─ 机器人打卡消息ID: {sent_message.message_id}\n"
-                f"    ├─ 键盘引用消息ID: {last_back_id}\n"
-                f"    ├─ 记录日期: {record_date}\n"
-                f"    └─ 班次详情: {shift_detail}"
+                f"📝 用户 {uid} 开始活动 {act}（{shift_text}），消息ID: {sent_message.message_id}, "
+                f"记录日期: {record_date}, 班次详情: {shift_detail}"
             )
 
             if act == "吃饭":
@@ -1497,15 +1468,6 @@ async def _process_back_locked(
     start_time = time.time()
     key = f"{chat_id}:{uid}"
 
-    quote_id = None
-    if message.reply_to_message:
-        quote_id = message.reply_to_message.message_id
-        logger.info(f"📝 用户回座消息已引用: {quote_id}")
-    else:
-        quote_id = await db.get_user_checkin_message_id(chat_id, uid)
-        if quote_id:
-            logger.info(f"📝 使用上次打卡消息作为引用: {quote_id}")
-
     if key in active_back_processing:
         lock_time = active_back_processing.get(key)
         if isinstance(lock_time, (int, float)) and time.time() - lock_time > 30:
@@ -1528,10 +1490,6 @@ async def _process_back_locked(
         user_data = await db.get_user_cached(chat_id, uid)
         logger.debug(f"🔍 用户数据: {user_data}")
 
-        # ✅ 获取机器人打卡消息ID（用于按钮引用）
-        last_checkin_id = await db.get_user_checkin_message_id(chat_id, uid)
-        logger.info(f"🔍 用户 {uid} 获取机器人打卡消息ID: {last_checkin_id}")
-
         if not user_data or not user_data.get("current_activity"):
             await message.answer(
                 Config.MESSAGES["no_activity"],
@@ -1548,7 +1506,6 @@ async def _process_back_locked(
 
         original_shift = user_data.get("shift", "day")
 
-        # 获取打卡消息ID用于日志
         checkin_message_id = await db.get_user_checkin_message_id(chat_id, uid)
         logger.info(f"📝 回座: 用户 {uid}，原打卡消息ID: {checkin_message_id}")
 
@@ -1559,7 +1516,6 @@ async def _process_back_locked(
         if not checkin_message_id:
             logger.warning(f"⚠️ 用户 {uid} 没有找到打卡消息ID")
 
-        # ... 时间解析代码保持不变 ...
         start_time_dt = None
         try:
             if activity_start_time_str:
@@ -1595,7 +1551,6 @@ async def _process_back_locked(
             logger.warning("时间解析失败，使用当前时间作为备用")
             start_time_dt = now
 
-        # ... 班次判定代码保持不变 ...
         user_shift_state = await db.get_user_active_shift(chat_id, uid)
 
         if user_shift_state:
@@ -1752,8 +1707,9 @@ async def _process_back_locked(
         # 获取用户总数据
         user_data_task = asyncio.create_task(db.get_user_cached(chat_id, uid))
 
-        # 获取今天的统计数据
+        # 获取今天的统计数据（使用强制归档的日期）
         async with db.pool.acquire() as conn:
+            # 查询今天的所有活动记录（从 user_activities 表）
             today_activities_rows = await conn.fetch(
                 """
                 SELECT activity_name, activity_count, accumulated_time
@@ -1762,9 +1718,10 @@ async def _process_back_locked(
                 """,
                 chat_id,
                 uid,
-                forced_date,
+                forced_date,  # 使用强制归档的日期
             )
 
+            # 查询今天的累计时间和次数
             today_stats_row = await conn.fetchrow(
                 """
                 SELECT 
@@ -1780,8 +1737,10 @@ async def _process_back_locked(
                 forced_date,
             )
 
+        # 等待用户总数据
         user_data = await user_data_task
 
+        # 构建今天的活动计数
         today_activities = {}
         for row in today_activities_rows:
             act_name = row["activity_name"]
@@ -1790,14 +1749,15 @@ async def _process_back_locked(
                 "time": row["accumulated_time"],
             }
 
+        # 获取今天的总时间和次数
         today_total_time = today_stats_row["total_time"] if today_stats_row else 0
         today_total_count = today_stats_row["total_count"] if today_stats_row else 0
 
+        # 用于显示的活动计数（今天的数据）
         activity_counts = {
             act: info.get("count", 0) for act, info in today_activities.items()
         }
 
-        # 构建回座消息
         back_message = MessageFormatter.format_back_message(
             user_id=uid,
             user_name=user_data.get("nickname", nickname),
@@ -1807,85 +1767,36 @@ async def _process_back_locked(
             total_activity_time=MessageFormatter.format_time(
                 int(today_activities.get(act, {}).get("time", 0))
             ),
-            total_time=MessageFormatter.format_time(int(today_total_time)),
+            total_time=MessageFormatter.format_time(
+                int(today_total_time)
+            ),  # 今天的累计时间
             activity_counts=activity_counts,
-            total_count=int(today_total_count),
+            total_count=int(today_total_count),  # 今天的活动次数
             is_overtime=is_overtime,
             overtime_seconds=overtime_seconds,
             fine_amount=fine_amount,
         )
 
-        # ✅ 生成键盘时传入打卡消息ID
-        keyboard = await get_main_keyboard(
+        # ===== 新的代码（使用 ForceReply）=====
+        from utils import get_quote_id, send_with_force_reply
+
+        # 使用智能引用函数发送带 ForceReply 的消息
+        back_msg = await send_with_force_reply(
+            message=message,
+            text=back_message,
             chat_id=chat_id,
-            show_admin=await is_admin(uid),
-            quote_message_id=last_checkin_id,  # 让回座按钮引用上次打卡消息
+            user_id=uid,
+            db_instance=db,
+            parse_mode="HTML",
         )
 
-        # 发送回座消息，引用用户回座消息
-        bot_back_message = None
-        send_success = False
+        # 清除旧的打卡消息ID（已经不需要了）
+        await db.clear_user_checkin_message(chat_id, uid)
 
-        try:
-            bot_back_message = await message.answer(
-                back_message,
-                reply_markup=keyboard,  # 使用带引用的键盘
-                reply_to_message_id=message.message_id,  # ✅ 机器人消息引用用户回座消息
-                parse_mode="HTML",
-            )
-            send_success = True
-            logger.info(f"✅ 机器人回座消息引用用户回座消息: {message.message_id}")
-        except Exception as e:
-            error_msg = str(e).lower()
-            if any(
-                k in error_msg
-                for k in [
-                    "message to reply not found",
-                    "message can't be replied",
-                    "message not found",
-                    "bad request: replied message not found",
-                ]
-            ):
-                logger.warning(
-                    f"⚠️ 用户回座消息 {message.message_id} 不可用，降级普通发送"
-                )
-                bot_back_message = await message.answer(
-                    back_message,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                )
-                send_success = True
-                logger.info(
-                    f"✅ 降级发送回座消息，消息ID: {bot_back_message.message_id}"
-                )
-            else:
-                logger.error(f"❌ 引用回复未知错误: {e}")
-                try:
-                    bot_back_message = await message.answer(
-                        back_message,
-                        reply_markup=keyboard,
-                        parse_mode="HTML",
-                    )
-                    send_success = True
-                    logger.info(
-                        f"✅ 最后尝试普通发送回座消息，消息ID: {bot_back_message.message_id}"
-                    )
-                except Exception as final_e:
-                    logger.error(f"❌ 所有发送方式都失败: {final_e}")
-                    raise
-
-        # ✅ 保存机器人回座消息ID（用于下次打卡按钮引用）
-        if send_success and bot_back_message:
-            await db.update_last_back_message_id(
-                chat_id, uid, bot_back_message.message_id
-            )
-            logger.info(
-                f"📝 保存机器人回座消息ID: {bot_back_message.message_id}，用于下次打卡引用"
-            )
-        else:
-            logger.error(
-                f"❌ 无法保存回座消息ID，send_success={send_success}, bot_back_message={bot_back_message}"
-            )
+        logger.info(
+            f"✅ 回座消息已发送: msg_id={back_msg.message_id}, "
+            f"quote_id={back_msg.reply_to_message.message_id if back_msg.reply_to_message else 'None'}"
+        )
 
         if is_overtime and fine_amount > 0:
             group_data = await db.get_group_cached(chat_id)
@@ -1947,11 +1858,14 @@ async def _process_back_locked(
         )
 
     finally:
+        # 先保存key状态
         had_lock = key in active_back_processing
 
+        # 清理消息ID（可能和定时器冲突，但日志重要）
         try:
             current_message_id = await db.get_user_checkin_message_id(chat_id, uid)
             if current_message_id:
+                # 快速检查用户是否还有活动
                 final_user_data = await db.get_user_cached(chat_id, uid)
                 if not final_user_data or not final_user_data.get("current_activity"):
                     await db.clear_user_checkin_message(chat_id, uid)
@@ -1961,6 +1875,7 @@ async def _process_back_locked(
         except Exception as e:
             logger.warning(f"⚠️ finally 清理失败: {e}")
 
+        # 释放处理锁
         if had_lock:
             active_back_processing.pop(key, None)
             logger.info(f"✅ [回座锁释放] key={key}")
@@ -6533,27 +6448,6 @@ async def handle_back_to_main_menu(message: types.Message):
     logger.info(f"已为用户 {uid} 返回主菜单")
 
 
-class QuotedMessage:
-    """带引用的消息包装类"""
-
-    def __init__(self, original_message, reply_to_message_id):
-        # 保存原始消息的引用
-        self._original = original_message
-        self.chat = original_message.chat
-        self.from_user = original_message.from_user
-        self.message_id = original_message.message_id
-        self.text = original_message.text
-        # 设置引用消息
-        self.reply_to_message = type(
-            "obj", (object,), {"message_id": reply_to_message_id}
-        )()
-
-    async def answer(self, *args, **kwargs):
-        """使用原始消息的 answer 方法发送回复"""
-        # 使用原始消息的 answer 方法
-        return await self._original.answer(*args, **kwargs)
-
-
 @user_rate_limit(rate=10, per=60)
 @rate_limit(rate=100, per=60)
 async def handle_all_text_messages(message: types.Message):
@@ -6570,34 +6464,11 @@ async def handle_all_text_messages(message: types.Message):
         activity_limits = await db.get_activity_limits_cached()
         if text in activity_limits.keys():
             logger.info(f"活动按钮点击: {text} - 用户 {uid}")
-
-            # 为打卡自动引用上次回座消息
-            last_back_id = await db.get_last_back_message_id(chat_id, uid)
-
-            if last_back_id:
-                quoted_message = QuotedMessage(message, last_back_id)
-                await start_activity(quoted_message, text)
-            else:
-                await start_activity(message, text)
+            await start_activity(message, text)
             return
     except Exception as e:
         logger.error(f"处理活动按钮时出错: {e}")
 
-    # 处理回座命令
-    if text in ["✅ 回座", "回座", "/at"]:
-        logger.info(f"回座命令: {text} - 用户 {uid}")
-
-        # 为回座自动引用上次打卡消息
-        last_checkin_id = await db.get_user_checkin_message_id(chat_id, uid)
-
-        if last_checkin_id:
-            quoted_message = QuotedMessage(message, last_checkin_id)
-            await process_back(quoted_message)
-        else:
-            await process_back(message)
-        return
-
-    # 其他情况...
     await message.answer(
         "请使用下方按钮或直接输入活动名称进行操作：\n\n"
         "📝 使用方法：\n"

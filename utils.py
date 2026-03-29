@@ -1305,3 +1305,96 @@ def init_notification_service(bot_manager_instance=None, bot_instance=None):
     logger.info(
         f"📊 通知服务初始化状态: bot_manager={notification_service.bot_manager is not None}, bot={notification_service.bot is not None}"
     )
+
+
+# utils.py - 添加
+
+from aiogram.types import ForceReply
+
+
+async def get_quote_id(
+    message: types.Message, chat_id: int, user_id: int, db_instance
+) -> int:
+    """
+    智能获取应该引用的消息ID
+
+    优先级：
+    1. 用户主动回复的消息（ForceReply 带来的自动引用）
+    2. 数据库中的待回复消息（兜底）
+    3. 数据库中的打卡消息（二级兜底）
+    4. 当前消息本身（最终兜底）
+
+    Returns:
+        int: 应该引用的消息ID
+    """
+    # 优先级1：用户主动回复（ForceReply 带来的自动引用）
+    if message.reply_to_message:
+        quote_id = message.reply_to_message.message_id
+        logger.debug(f"✅ [引用] 使用用户主动回复的消息ID: {quote_id}")
+        # 清除待回复消息ID（因为已经用上了）
+        await db_instance.clear_pending_reply_message(chat_id, user_id)
+        return quote_id
+
+    # 优先级2：数据库中的待回复消息（兜底）
+    pending_id = await db_instance.get_pending_reply_message(chat_id, user_id)
+    if pending_id:
+        logger.debug(f"✅ [引用] 使用待回复消息ID（兜底）: {pending_id}")
+        return pending_id
+
+    # 优先级3：数据库中的打卡消息（二级兜底）
+    checkin_id = await db_instance.get_user_checkin_message_id(chat_id, user_id)
+    if checkin_id:
+        logger.debug(f"✅ [引用] 使用打卡消息ID（二级兜底）: {checkin_id}")
+        return checkin_id
+
+    # 优先级4：当前消息本身（最终兜底）
+    logger.debug(f"✅ [引用] 使用当前消息ID（最终兜底）: {message.message_id}")
+    return message.message_id
+
+
+async def send_with_force_reply(
+    message: types.Message,
+    text: str,
+    chat_id: int,
+    user_id: int,
+    db_instance,
+    parse_mode: str = "HTML",
+    **kwargs,
+) -> types.Message:
+    """
+    发送带 ForceReply 的消息，并自动保存为待回复消息
+
+    Args:
+        message: 原始消息对象
+        text: 要发送的文本
+        chat_id: 群组ID
+        user_id: 用户ID
+        db_instance: 数据库实例
+        parse_mode: 解析模式
+        **kwargs: 其他参数
+
+    Returns:
+        发送的消息对象
+    """
+    # 智能获取引用ID
+    quote_id = await get_quote_id(message, chat_id, user_id, db_instance)
+
+    # 发送带 ForceReply 的消息
+    sent_msg = await message.answer(
+        text,
+        reply_to_message_id=quote_id,
+        reply_markup=ForceReply(selective=True),
+        parse_mode=parse_mode,
+        **kwargs,
+    )
+
+    # 保存为待回复消息（兜底用）
+    await db_instance.update_pending_reply_message(
+        chat_id, user_id, sent_msg.message_id
+    )
+
+    logger.debug(
+        f"📨 发送 ForceReply 消息: msg_id={sent_msg.message_id}, quote_id={quote_id}"
+    )
+
+    return sent_msg

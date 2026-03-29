@@ -776,8 +776,7 @@ class PostgreSQLDatabase:
                     activity_start_time TEXT,
                     shift TEXT DEFAULT 'day',
                     checkin_message_id BIGINT DEFAULT NULL,
-                    last_checkin_message_id BIGINT DEFAULT NULL,
-                    last_back_message_id BIGINT DEFAULT NULL,
+                    pending_reply_message_id BIGINT DEFAULT NULL,
                     total_accumulated_time INTEGER DEFAULT 0,
                     total_activity_count INTEGER DEFAULT 0,
                     total_fines INTEGER DEFAULT 0,
@@ -1804,8 +1803,7 @@ class PostgreSQLDatabase:
             SELECT user_id, nickname, current_activity, activity_start_time, 
                    total_accumulated_time, total_activity_count, total_fines,
                    overtime_count, total_overtime_time, last_updated, 
-                   checkin_message_id, last_checkin_message_id, last_back_message_id,  
-                   shift
+                   checkin_message_id, shift
             FROM users 
             WHERE chat_id = $1 AND user_id = $2
             """,
@@ -1816,13 +1814,12 @@ class PostgreSQLDatabase:
 
         if row:
             result = dict(row)
-            # 确保字段存在
-            if "last_checkin_message_id" not in result:
-                result["last_checkin_message_id"] = None
-            if "last_back_message_id" not in result:
-                result["last_back_message_id"] = None
+            if "shift" not in result or result["shift"] is None:
+                result["shift"] = "day"
+                logger.warning(f"用户 {user_id} 的 shift 字段为 None，使用默认值 'day'")
 
             self._set_cached(cache_key, result, 30)
+            logger.debug(f"获取用户缓存: {user_id}, shift={result['shift']}")
             return result
         return None
 
@@ -1958,25 +1955,16 @@ class PostgreSQLDatabase:
             )
         self._cache.pop(f"user:{chat_id}:{user_id}", None)
 
-    async def get_last_checkin_message_id(
-        self, chat_id: int, user_id: int
-    ) -> Optional[int]:
-        """获取机器人最后一次打卡消息ID"""
-        user_data = await self.get_user_cached(chat_id, user_id)
-        if user_data:
-            return user_data.get("last_checkin_message_id")
-        return None
-
-    async def update_last_checkin_message_id(
+    async def update_pending_reply_message(
         self, chat_id: int, user_id: int, message_id: int
     ):
-        """更新机器人最后一次打卡消息ID"""
+        """更新待回复消息ID（用于 ForceReply 兜底）"""
         self._ensure_pool_initialized()
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE users 
-                SET last_checkin_message_id = $1, updated_at = CURRENT_TIMESTAMP 
+                SET pending_reply_message_id = $1, updated_at = CURRENT_TIMESTAMP 
                 WHERE chat_id = $2 AND user_id = $3
                 """,
                 message_id,
@@ -1986,53 +1974,31 @@ class PostgreSQLDatabase:
         cache_key = f"user:{chat_id}:{user_id}"
         self._cache.pop(cache_key, None)
         self._cache_ttl.pop(cache_key, None)
+        logger.debug(f"✅ 已更新用户 {user_id} 的待回复消息ID为 {message_id}")
 
-    async def get_last_back_message_id(
+    async def get_pending_reply_message(
         self, chat_id: int, user_id: int
     ) -> Optional[int]:
-        """获取机器人最后一次回座消息ID"""
+        """获取待回复消息ID"""
         user_data = await self.get_user_cached(chat_id, user_id)
-        if user_data:
-            return user_data.get("last_back_message_id")
-        return None
+        return user_data.get("pending_reply_message_id") if user_data else None
 
-    async def update_last_back_message_id(
-        self, chat_id: int, user_id: int, message_id: int
-    ):
-        """更新机器人最后一次回座消息ID"""
+    async def clear_pending_reply_message(self, chat_id: int, user_id: int):
+        """清除待回复消息ID"""
         self._ensure_pool_initialized()
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE users 
-                SET last_back_message_id = $1, updated_at = CURRENT_TIMESTAMP 
-                WHERE chat_id = $2 AND user_id = $3
+                SET pending_reply_message_id = NULL, updated_at = CURRENT_TIMESTAMP 
+                WHERE chat_id = $1 AND user_id = $2
                 """,
-                message_id,
                 chat_id,
                 user_id,
             )
         cache_key = f"user:{chat_id}:{user_id}"
         self._cache.pop(cache_key, None)
-
-    async def update_checkin_message_id(
-        self, chat_id: int, user_id: int, message_id: int
-    ):
-        """更新用户的打卡消息ID（兼容旧代码）"""
-        self._ensure_pool_initialized()
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE users 
-                SET checkin_message_id = $1, updated_at = CURRENT_TIMESTAMP 
-                WHERE chat_id = $2 AND user_id = $3
-                """,
-                message_id,
-                chat_id,
-                user_id,
-            )
-        cache_key = f"user:{chat_id}:{user_id}"
-        self._cache.pop(cache_key, None)
+        self._cache_ttl.pop(cache_key, None)
 
     # ====== 核心业务方法 ======
     async def complete_user_activity(
