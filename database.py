@@ -1804,7 +1804,8 @@ class PostgreSQLDatabase:
             SELECT user_id, nickname, current_activity, activity_start_time, 
                    total_accumulated_time, total_activity_count, total_fines,
                    overtime_count, total_overtime_time, last_updated, 
-                   checkin_message_id, shift
+                   checkin_message_id, last_checkin_message_id, last_back_message_id,  
+                   shift
             FROM users 
             WHERE chat_id = $1 AND user_id = $2
             """,
@@ -1815,12 +1816,13 @@ class PostgreSQLDatabase:
 
         if row:
             result = dict(row)
-            if "shift" not in result or result["shift"] is None:
-                result["shift"] = "day"
-                logger.warning(f"用户 {user_id} 的 shift 字段为 None，使用默认值 'day'")
+            # 确保字段存在
+            if "last_checkin_message_id" not in result:
+                result["last_checkin_message_id"] = None
+            if "last_back_message_id" not in result:
+                result["last_back_message_id"] = None
 
             self._set_cached(cache_key, result, 30)
-            logger.debug(f"获取用户缓存: {user_id}, shift={result['shift']}")
             return result
         return None
 
@@ -1983,6 +1985,7 @@ class PostgreSQLDatabase:
             )
         cache_key = f"user:{chat_id}:{user_id}"
         self._cache.pop(cache_key, None)
+        self._cache_ttl.pop(cache_key, None)
 
     async def get_last_back_message_id(
         self, chat_id: int, user_id: int
