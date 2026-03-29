@@ -6533,6 +6533,25 @@ async def handle_back_to_main_menu(message: types.Message):
     logger.info(f"已为用户 {uid} 返回主菜单")
 
 
+class QuotedMessage:
+    """带引用的消息包装类"""
+
+    def __init__(self, original_message, reply_to_message_id):
+        self.chat = original_message.chat
+        self.from_user = original_message.from_user
+        self.message_id = original_message.message_id
+        self.text = original_message.text
+        # 设置引用消息
+        self.reply_to_message = type(
+            "obj", (object,), {"message_id": reply_to_message_id}
+        )()
+
+    async def answer(self, *args, **kwargs):
+        return await self.chat.send_message(
+            *args, **kwargs
+        )  # 修正：使用 chat.send_message
+
+
 @user_rate_limit(rate=10, per=60)
 @rate_limit(rate=100, per=60)
 async def handle_all_text_messages(message: types.Message):
@@ -6550,8 +6569,14 @@ async def handle_all_text_messages(message: types.Message):
         if text in activity_limits.keys():
             logger.info(f"活动按钮点击: {text} - 用户 {uid}")
 
-            # ✅ 直接调用 start_activity，它会自己处理引用
-            await start_activity(message, text)
+            # 为打卡自动引用上次回座消息
+            last_back_id = await db.get_last_back_message_id(chat_id, uid)
+
+            if last_back_id:
+                quoted_message = QuotedMessage(message, last_back_id)
+                await start_activity(quoted_message, text)
+            else:
+                await start_activity(message, text)
             return
     except Exception as e:
         logger.error(f"处理活动按钮时出错: {e}")
@@ -6559,7 +6584,15 @@ async def handle_all_text_messages(message: types.Message):
     # 处理回座命令
     if text in ["✅ 回座", "回座", "/at"]:
         logger.info(f"回座命令: {text} - 用户 {uid}")
-        await process_back(message)
+
+        # 为回座自动引用上次打卡消息
+        last_checkin_id = await db.get_user_checkin_message_id(chat_id, uid)
+
+        if last_checkin_id:
+            quoted_message = QuotedMessage(message, last_checkin_id)
+            await process_back(quoted_message)
+        else:
+            await process_back(message)
         return
 
     # 其他情况...
