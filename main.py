@@ -1242,6 +1242,15 @@ async def start_activity(message: types.Message, act: str):
     chat_id = message.chat.id
     uid = message.from_user.id
 
+    quote_id = None
+    if message.reply_to_message:
+        quote_id = message.reply_to_message.message_id
+        logger.info(f"📝 用户消息已引用: {quote_id}")
+    else:
+        quote_id = await db.get_last_back_message_id(chat_id, uid)
+        if quote_id:
+            logger.info(f"📝 使用上次回座消息作为引用: {quote_id}")
+
     # 创建看门狗，30秒超时
     watchdog = Watchdog(timeout=30, name=f"start_activity_{chat_id}_{uid}")
 
@@ -1409,7 +1418,8 @@ async def start_activity(message: types.Message, act: str):
                     current_shift,
                 ),
                 reply_markup=keyboard,  # 使用带引用的键盘
-                reply_to_message_id=message.message_id,  # ✅ 机器人消息引用用户消息
+                reply_to_message_id=quote_id
+                or message.message_id,  # ✅ 机器人消息引用用户消息
                 parse_mode="HTML",
             )
 
@@ -1486,6 +1496,15 @@ async def _process_back_locked(
     """线程安全的回座逻辑"""
     start_time = time.time()
     key = f"{chat_id}:{uid}"
+
+    quote_id = None
+    if message.reply_to_message:
+        quote_id = message.reply_to_message.message_id
+        logger.info(f"📝 用户回座消息已引用: {quote_id}")
+    else:
+        quote_id = await db.get_user_checkin_message_id(chat_id, uid)
+        if quote_id:
+            logger.info(f"📝 使用上次打卡消息作为引用: {quote_id}")
 
     if key in active_back_processing:
         lock_time = active_back_processing.get(key)
@@ -6530,11 +6549,20 @@ async def handle_all_text_messages(message: types.Message):
         activity_limits = await db.get_activity_limits_cached()
         if text in activity_limits.keys():
             logger.info(f"活动按钮点击: {text} - 用户 {uid}")
+
+            # ✅ 直接调用 start_activity，它会自己处理引用
             await start_activity(message, text)
             return
     except Exception as e:
         logger.error(f"处理活动按钮时出错: {e}")
 
+    # 处理回座命令
+    if text in ["✅ 回座", "回座", "/at"]:
+        logger.info(f"回座命令: {text} - 用户 {uid}")
+        await process_back(message)
+        return
+
+    # 其他情况...
     await message.answer(
         "请使用下方按钮或直接输入活动名称进行操作：\n\n"
         "📝 使用方法：\n"
