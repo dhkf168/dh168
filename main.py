@@ -1383,26 +1383,25 @@ async def start_activity(message: types.Message, act: str):
             )
 
             # ✅ 使用 send_with_force_reply 发送打卡消息
-            sent_message = await send_with_force_reply(
-                message=message,
-                text=MessageFormatter.format_activity_message(
-                    uid,
-                    name,
-                    act,
-                    now.strftime("%m/%d %H:%M:%S"),
-                    current_count + 1,
-                    max_times,
-                    time_limit,
-                    current_shift,
-                ),
-                chat_id=chat_id,
-                user_id=uid,
-                db_instance=db,
+            sent_message = await message.answer(
+                MessageFormatter.format_activity_message(...),
+                reply_to_message_id=message.message_id,
+                reply_markup=await get_main_keyboard(
+                    chat_id, await is_admin(uid)
+                ),  # 键盘在这里
                 parse_mode="HTML",
             )
 
-            # 同时保存打卡消息ID
+            # 2. 保存打卡消息ID
             await db.update_user_checkin_message(chat_id, uid, sent_message.message_id)
+
+            # 3. 再发送 ForceReply 消息（让输入框进入回复模式，引用打卡消息）
+            await message.answer(
+                "💡 下次打卡会自动引用本条消息",
+                reply_to_message_id=sent_message.message_id,  # ✅ 引用打卡消息
+                reply_markup=ForceReply(selective=True),  # 输入框进入回复模式
+                parse_mode="HTML",
+            )
 
             logger.info(
                 f"📝 用户 {uid} 开始活动 {act}（{shift_text}），消息ID: {sent_message.message_id}, "
@@ -1780,22 +1779,28 @@ async def _process_back_locked(
         # ===== 新的代码（使用 ForceReply）=====
         from utils import get_quote_id, send_with_force_reply
 
-        # 使用智能引用函数发送带 ForceReply 的消息
-        back_msg = await send_with_force_reply(
-            message=message,
-            text=back_message,
-            chat_id=chat_id,
-            user_id=uid,
-            db_instance=db,
+        # 1. 发送回座消息（带键盘按钮）
+        back_msg = await message.answer(
+            back_message,
+            reply_to_message_id=message.message_id,  # 引用用户回座消息
+            reply_markup=await get_main_keyboard(
+                chat_id, await is_admin(uid)
+            ),  # ✅ 有按钮
             parse_mode="HTML",
         )
 
-        # 清除旧的打卡消息ID（已经不需要了）
+        # 2. 保存回座消息ID
+        await db.update_last_back_message_id(chat_id, uid, back_msg.message_id)
+
+        # 3. 清除打卡消息ID
         await db.clear_user_checkin_message(chat_id, uid)
 
-        logger.info(
-            f"✅ 回座消息已发送: msg_id={back_msg.message_id}, "
-            f"quote_id={back_msg.reply_to_message.message_id if back_msg.reply_to_message else 'None'}"
+        # 4. 发送 ForceReply 消息（让下次打卡引用）
+        await message.answer(
+            "💡 下次打卡会自动引用本条消息",
+            reply_to_message_id=back_msg.message_id,
+            reply_markup=ForceReply(selective=True),  # 输入框进入回复模式
+            parse_mode="HTML",
         )
 
         if is_overtime and fine_amount > 0:

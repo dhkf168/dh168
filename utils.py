@@ -1352,6 +1352,7 @@ async def get_quote_id(
     return message.message_id
 
 
+# utils.py - 修复后的 send_with_force_reply
 async def send_with_force_reply(
     message: types.Message,
     text: str,
@@ -1363,19 +1364,10 @@ async def send_with_force_reply(
 ) -> types.Message:
     """
     发送带 ForceReply 的消息，并自动保存为待回复消息
-
-    Args:
-        message: 原始消息对象
-        text: 要发送的文本
-        chat_id: 群组ID
-        user_id: 用户ID
-        db_instance: 数据库实例
-        parse_mode: 解析模式
-        **kwargs: 其他参数
-
-    Returns:
-        发送的消息对象
+    同时重新发送键盘，确保按钮可见
     """
+    from main import get_main_keyboard, is_admin  # 避免循环导入
+
     # 智能获取引用ID
     quote_id = await get_quote_id(message, chat_id, user_id, db_instance)
 
@@ -1391,6 +1383,12 @@ async def send_with_force_reply(
     # 保存为待回复消息（兜底用）
     await db_instance.update_pending_reply_message(
         chat_id, user_id, sent_msg.message_id
+    )
+
+    # ✅ 关键：重新发送键盘，保持按钮可见
+    await message.answer(
+        "📋 请选择活动：",
+        reply_markup=await get_main_keyboard(chat_id, await is_admin(user_id)),
     )
 
     logger.debug(
