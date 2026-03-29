@@ -885,6 +885,77 @@ async def get_main_keyboard(
     )
 
 
+# 在 get_main_keyboard 函数后面添加
+
+
+async def get_main_inline_keyboard(
+    chat_id: int = None, user_id: int = None, show_admin: bool = False
+) -> InlineKeyboardMarkup:
+    """获取主内联键盘（支持自动引用）"""
+
+    # 获取用户自己的上次回座消息ID（用于打卡按钮）
+    last_back_id = None
+    if chat_id and user_id:
+        last_back_id = await db.get_last_back_message_id(chat_id, user_id)
+
+    # 获取用户自己的上次打卡消息ID（用于回座按钮）
+    last_checkin_id = None
+    if chat_id and user_id:
+        last_checkin_id = await db.get_last_checkin_message_id(chat_id, user_id)
+
+    activity_limits = await db.get_activity_limits_cached()
+
+    keyboard = []
+    row = []
+
+    for act in activity_limits.keys():
+        # 构建自动引用的查询文本
+        if last_back_id:
+            query_text = f"quote_{last_back_id} {act}"
+        else:
+            query_text = act
+
+        button = InlineKeyboardButton(
+            text=act, switch_inline_query_current_chat=query_text
+        )
+        row.append(button)
+
+        if len(row) >= 3:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    # 回座按钮
+    if last_checkin_id:
+        back_query = f"quote_{last_checkin_id} 回座"
+    else:
+        back_query = "回座"
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="✅ 回座", switch_inline_query_current_chat=back_query
+            )
+        ]
+    )
+
+    # 其他按钮（使用普通回调）
+    bottom_row = []
+    if show_admin:
+        bottom_row.append(
+            InlineKeyboardButton(text="👑 管理员面板", callback_data="admin_panel")
+        )
+    bottom_row.append(
+        InlineKeyboardButton(text="📊 我的记录", callback_data="my_record")
+    )
+    bottom_row.append(InlineKeyboardButton(text="🏆 排行榜", callback_data="rank"))
+    keyboard.append(bottom_row)
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 def get_admin_keyboard() -> ReplyKeyboardMarkup:
     """管理员专用键盘"""
     keyboard = ReplyKeyboardMarkup(
@@ -1231,8 +1302,6 @@ async def activity_timer(
             logger.error(f"❌ 定时器清理异常: {e}")
 
 
-# ========== 核心打卡功能 ==========
-# ========== 核心打卡功能 ==========
 async def start_activity(message: types.Message, act: str):
     """开始活动（带看门狗保护）"""
     chat_id = message.chat.id
@@ -1258,8 +1327,8 @@ async def start_activity(message: types.Message, act: str):
             if has_active:
                 await message.answer(
                     Config.MESSAGES["has_activity"].format(current_act),
-                    reply_markup=await get_main_keyboard(
-                        chat_id=chat_id, show_admin=await is_admin(uid)
+                    reply_markup=await get_main_inline_keyboard(
+                        chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                     ),
                     reply_to_message_id=message.message_id,
                 )
@@ -1272,8 +1341,8 @@ async def start_activity(message: types.Message, act: str):
             if not user_shift_state:
                 await message.answer(
                     "❌ 您当前没有进行中的班次，请先打上班卡！",
-                    reply_markup=await get_main_keyboard(
-                        chat_id=chat_id, show_admin=await is_admin(uid)
+                    reply_markup=await get_main_inline_keyboard(
+                        chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                     ),
                     reply_to_message_id=message.message_id,
                 )
@@ -1294,8 +1363,8 @@ async def start_activity(message: types.Message, act: str):
                 await db.clear_user_shift_state(chat_id, uid, user_shift_state["shift"])
                 await message.answer(
                     "❌ 您的班次已过期（超过16小时），请重新上班打卡！",
-                    reply_markup=await get_main_keyboard(
-                        chat_id=chat_id, show_admin=await is_admin(uid)
+                    reply_markup=await get_main_inline_keyboard(
+                        chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                     ),
                     reply_to_message_id=message.message_id,
                 )
@@ -1328,8 +1397,8 @@ async def start_activity(message: types.Message, act: str):
             if not can_perform:
                 await message.answer(
                     reason,
-                    reply_markup=await get_main_keyboard(
-                        chat_id=chat_id, show_admin=await is_admin(uid)
+                    reply_markup=await get_main_inline_keyboard(
+                        chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                     ),
                     reply_to_message_id=message.message_id,
                 )
@@ -1344,8 +1413,8 @@ async def start_activity(message: types.Message, act: str):
                         f"📊 限制人数：<code>{user_limit}</code> 人\n"
                         f"• 当前进行：<code>{current_users}</code> 人\n"
                         f"• 剩余名额：<code>0</code> 人",
-                        reply_markup=await get_main_keyboard(
-                            chat_id=chat_id, show_admin=await is_admin(uid)
+                        reply_markup=await get_main_inline_keyboard(
+                            chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                         ),
                         reply_to_message_id=message.message_id,
                         parse_mode="HTML",
@@ -1362,19 +1431,15 @@ async def start_activity(message: types.Message, act: str):
                 await message.answer(
                     f"❌ {shift_text}的 '<code>{act}</code>' 次数已达上限\n\n"
                     f"📊 当前次数：<code>{current_count}</code> / <code>{max_times}</code>",
-                    reply_markup=await get_main_keyboard(
-                        chat_id=chat_id, show_admin=await is_admin(uid)
+                    reply_markup=await get_main_inline_keyboard(
+                        chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                     ),
                     reply_to_message_id=message.message_id,
                     parse_mode="HTML",
                 )
                 return
 
-            await db.update_user_activity(
-                chat_id, uid, act, str(now), name, current_shift
-            )
-
-            # ✅ 记录用户消息信息（用于日志）
+            # ✅ 用户消息就是 message 本身，不需要机器人再发送
             quoted_msg_id = (
                 message.reply_to_message.message_id
                 if message.reply_to_message
@@ -1382,6 +1447,11 @@ async def start_activity(message: types.Message, act: str):
             )
             logger.info(
                 f"📝 用户 {uid} 发送活动消息，消息ID: {message.message_id}, 引用消息ID: {quoted_msg_id}"
+            )
+
+            # 更新用户活动状态
+            await db.update_user_activity(
+                chat_id, uid, act, str(now), name, current_shift
             )
 
             time_limit = await db.get_activity_time_limit(act)
@@ -1401,8 +1471,8 @@ async def start_activity(message: types.Message, act: str):
                     time_limit,
                     current_shift,
                 ),
-                reply_markup=await get_main_keyboard(
-                    chat_id=chat_id, show_admin=await is_admin(uid)
+                reply_markup=await get_main_inline_keyboard(
+                    chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                 ),
                 reply_to_message_id=message.message_id,  # ✅ 引用用户消息
                 parse_mode="HTML",
@@ -1511,8 +1581,8 @@ async def _process_back_locked(
         if not user_data or not user_data.get("current_activity"):
             await message.answer(
                 Config.MESSAGES["no_activity"],
-                reply_markup=await get_main_keyboard(
-                    chat_id=chat_id, show_admin=await is_admin(uid)
+                reply_markup=await get_main_inline_keyboard(
+                    chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                 ),
                 reply_to_message_id=message.message_id,
             )
@@ -1796,6 +1866,7 @@ async def _process_back_locked(
         )
 
         # ========== ✅ 修正：发送机器人回座消息，并统一处理消息ID保存 ==========
+        # ========== ✅ 修正：发送机器人回座消息，并统一处理消息ID保存 ==========
         bot_back_message = None
         send_success = False
 
@@ -1803,8 +1874,8 @@ async def _process_back_locked(
         try:
             bot_back_message = await message.answer(
                 back_message,
-                reply_markup=await get_main_keyboard(
-                    chat_id=chat_id, show_admin=await is_admin(uid)
+                reply_markup=await get_main_inline_keyboard(
+                    chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                 ),
                 reply_to_message_id=message.message_id,  # ✅ 引用用户回座消息
                 parse_mode="HTML",
@@ -1828,8 +1899,8 @@ async def _process_back_locked(
                 # ✅ 降级发送时也要获取并保存消息对象
                 bot_back_message = await message.answer(
                     back_message,
-                    reply_markup=await get_main_keyboard(
-                        chat_id=chat_id, show_admin=await is_admin(uid)
+                    reply_markup=await get_main_inline_keyboard(
+                        chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                     ),
                     parse_mode="HTML",
                 )
@@ -1843,8 +1914,8 @@ async def _process_back_locked(
                 try:
                     bot_back_message = await message.answer(
                         back_message,
-                        reply_markup=await get_main_keyboard(
-                            chat_id=chat_id, show_admin=await is_admin(uid)
+                        reply_markup=await get_main_inline_keyboard(
+                            chat_id=chat_id, user_id=uid, show_admin=await is_admin(uid)
                         ),
                         parse_mode="HTML",
                     )
@@ -1914,6 +1985,23 @@ async def _process_back_locked(
 
             except Exception as e:
                 logger.error(f"❌ 吃饭回座推送失败: {e}")
+
+        logger.info(
+            f"📊 [回座完成] 用户{uid} | 活动:{act} | "
+            f"班次:{final_shift} | 归属:{shift_detail} | "
+            f"业务日期:{business_date} | 强制日期:{forced_date} | 超时:{is_overtime} | 罚款:{fine_amount}"
+        )
+
+        quoted_msg_id = (
+            message.reply_to_message.message_id if message.reply_to_message else None
+        )
+        logger.info(
+            f"📝 用户 {uid} 发送回座消息\n"
+            f"    ├─ 用户消息ID: {message.message_id}\n"
+            f"    ├─ 用户引用消息ID: {quoted_msg_id}\n"
+            f"    ├─ 机器人回座消息ID: {bot_back_message.message_id if bot_back_message else 'None'}\n"
+            f"    └─ 期望用户引用: {last_checkin_id}"
+        )
 
         logger.info(
             f"📊 [回座完成] 用户{uid} | 活动:{act} | "
@@ -6555,6 +6643,37 @@ async def handle_all_text_messages(message: types.Message):
     )
 
 
+# 在 handle_all_text_messages 函数之前添加
+
+
+@dp.message()
+async def handle_auto_quote_message(message: types.Message):
+    """处理通过按钮发送的自动引用消息"""
+    text = message.text
+
+    if text.startswith("quote_"):
+        parts = text.split(" ", 1)
+        quoted_id = int(parts[0].replace("quote_", ""))
+        actual_text = parts[1] if len(parts) > 1 else ""
+
+        logger.info(
+            f"📨 自动引用消息: 用户={message.from_user.id}, "
+            f"引用ID={quoted_id}, 内容={actual_text}"
+        )
+
+        # ✅ 修复：在这里获取活动列表
+        activity_limits = await db.get_activity_limits_cached()
+
+        if actual_text in activity_limits:
+            await start_activity(message, actual_text)
+            return
+        elif actual_text == "回座":
+            await process_back(message)
+            return
+
+    await handle_all_text_messages(message)
+
+
 @rate_limit(rate=10, per=60)
 @message_deduplicate
 @with_retry("fixed_activity", max_retries=2)
@@ -8774,6 +8893,9 @@ async def register_handlers():
     dp.message.register(cmd_handover_config, Command("handoverconfig"))
     dp.message.register(cmd_set_handover_day, Command("sethandoverday"))
     dp.message.register(cmd_set_handover_hours, Command("sethour"))
+    dp.message.register(
+        handle_auto_quote_message, lambda m: m.text and m.text.startswith("quote_")
+    )
 
     dp.message.register(
         handle_back_command,
