@@ -886,8 +886,6 @@ async def get_main_keyboard(
 
 
 # 在 get_main_keyboard 函数后面添加
-
-
 async def get_main_inline_keyboard(
     chat_id: int = None, user_id: int = None, show_admin: bool = False
 ) -> InlineKeyboardMarkup:
@@ -6643,10 +6641,6 @@ async def handle_all_text_messages(message: types.Message):
     )
 
 
-# 在 handle_all_text_messages 函数之前添加
-
-
-@dp.message()
 async def handle_auto_quote_message(message: types.Message):
     """处理通过按钮发送的自动引用消息"""
     text = message.text
