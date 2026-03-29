@@ -6537,6 +6537,8 @@ class QuotedMessage:
     """带引用的消息包装类"""
 
     def __init__(self, original_message, reply_to_message_id):
+        # 保存原始消息的引用
+        self._original = original_message
         self.chat = original_message.chat
         self.from_user = original_message.from_user
         self.message_id = original_message.message_id
@@ -6547,9 +6549,9 @@ class QuotedMessage:
         )()
 
     async def answer(self, *args, **kwargs):
-        return await self.chat.send_message(
-            *args, **kwargs
-        )  # 修正：使用 chat.send_message
+        """使用原始消息的 answer 方法发送回复"""
+        # 使用原始消息的 answer 方法
+        return await self._original.answer(*args, **kwargs)
 
 
 @user_rate_limit(rate=10, per=60)
